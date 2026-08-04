@@ -33,8 +33,9 @@ Requires ComfyUI **v0.30.0+** (native MiniMax H3 support).
 ## Models
 
 GGUF quants (Q5_1 for 24-32GB cards, Q4_0 for 16GB):
-**huggingface.co/joeygambino/MiniMax-H3-GGUF** - the card there also
+[**joeygambino/MiniMax-H3-GGUF**](https://huggingface.co/joeygambino/MiniMax-H3-GGUF) - the card there also
 documents why K-quants (Q6_K etc.) are impossible for this architecture.
+Workflows also live on HF: [MiniMax-H3-Multishot-Workflow](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow).
 Text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3).
 
 ## Workflows
