@@ -14,6 +14,9 @@ N chained shots, one seam-clean master. Plus a dual-format model loader
   trimmed automatically.
 - **H3 Model Loader (safetensors + GGUF)** - one dropdown for both formats.
   GGUF files route through ComfyUI-GGUF automatically.
+- **H3 CLIP Loader (safetensors + GGUF)** - the same treatment for text
+  encoders; GGUF encoders auto-pair their `-mmproj` vision sidecar so image
+  referencing keeps working.
 - **H3 Shot List** - the same script parser as separate STRING outputs, for
   the expert graph.
 - **H3 Audio Trim Start** - trim N seconds from the front of an AUDIO clip

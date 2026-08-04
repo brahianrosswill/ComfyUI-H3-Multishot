@@ -128,6 +128,45 @@ class H3ModelLoaderAny:
         return (comfy.sd.load_diffusion_model(path),)
 
 
+class H3ClipLoaderAny:
+    """One dropdown for text encoders, both formats: .safetensors through
+    comfy core CLIPLoader, .gguf through ComfyUI-GGUF's CLIPLoaderGGUF
+    (which auto-pairs a matching -mmproj sidecar for vision)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        import os
+        import folder_paths
+        files = set(folder_paths.get_filename_list("text_encoders"))
+        for d in folder_paths.get_folder_paths("text_encoders"):
+            if os.path.isdir(d):
+                files |= {f for f in os.listdir(d)
+                          if f.lower().endswith(".gguf")
+                          and "mmproj" not in f.lower()}
+        import nodes as core_nodes
+        types = core_nodes.CLIPLoader.INPUT_TYPES()["required"]["type"]
+        return {"required": {
+            "clip_name": (sorted(files), {
+                "tooltip": "safetensors or GGUF - routed automatically. GGUF "
+                           "encoders auto-pair their -mmproj vision sidecar."}),
+            "type": types,
+        }}
+
+    RETURN_TYPES = ("CLIP",)
+    FUNCTION = "load"
+    CATEGORY = "loaders/minimax"
+
+    def load(self, clip_name, type):
+        import nodes as core_nodes
+        if clip_name.lower().endswith(".gguf"):
+            cls = core_nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderGGUF")
+            if cls is None:
+                raise RuntimeError(
+                    "ComfyUI-GGUF not loaded - install/enable it and restart.")
+            return cls().load_clip(clip_name, type)
+        return core_nodes.CLIPLoader().load_clip(clip_name, type=type)
+
+
 class H3AudioTrimStart:
     """Trim N seconds off the FRONT of an audio clip. Exists so the multishot
     master can drop each chained shot's duplicated first frame (1/24s) from
@@ -278,10 +317,12 @@ class H3MultishotSampler:
 
 NODE_CLASS_MAPPINGS = {"H3ScriptSplit": H3ScriptSplit,
                        "H3ModelLoaderAny": H3ModelLoaderAny,
+                       "H3ClipLoaderAny": H3ClipLoaderAny,
                        "H3AudioTrimStart": H3AudioTrimStart,
                        "H3MultishotSampler": H3MultishotSampler}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ScriptSplit": "H3 Shot List",
     "H3ModelLoaderAny": "H3 Model Loader (safetensors + GGUF)",
+    "H3ClipLoaderAny": "H3 CLIP Loader (safetensors + GGUF)",
     "H3AudioTrimStart": "H3 Audio Trim Start",
     "H3MultishotSampler": "H3 Multishot Sampler (one node)"}
