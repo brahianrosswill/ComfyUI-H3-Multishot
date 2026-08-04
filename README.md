@@ -43,6 +43,12 @@ Text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/Min
 - `H3_Multishot_3chain_expert.json` - the same pipeline exploded into three
   visible shot chains for tinkering (fixed 3 shots, per-stage access).
 
+## Sample
+
+[`samples/H3_multishot_presenter_demo.mp4`](samples/H3_multishot_presenter_demo.mp4) -
+30s, three chained shots from one script on the Q5_1 GGUF: identity and voice
+held across both seams. This video was made BY the workflow it demonstrates.
+
 ## Notes
 
 - `frames_per_shot` sits on H3's 17k+5 frame grid (243 = ~10.1s at 24fps;
