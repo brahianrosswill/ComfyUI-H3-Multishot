@@ -156,15 +156,94 @@ class H3ClipLoaderAny:
     FUNCTION = "load"
     CATEGORY = "loaders/minimax"
 
+    # llama.cpp/qwen2vl-era names -> the H3 encoder's exact visual.* layout
+    # (established 2026-08-04 against the official int8 file). Ordered, and
+    # chosen so no rule can re-hit another rule's output.
+    _VISION_FIXES = [
+        ("visual.merger.ln_q.", "visual.merger.norm."),
+        ("attn_qkv.", "attn.qkv."),
+        ("mlp.up_proj.", "mlp.linear_fc1."),
+        ("mlp.down_proj.", "mlp.linear_fc2."),
+        (".fc1.", ".linear_fc1."),
+        (".fc2.", ".linear_fc2."),
+        ("v.position_embd.weight", "visual.pos_embed.weight"),
+    ]
+
     def load(self, clip_name, type):
+        import re
+        import sys
         import nodes as core_nodes
-        if clip_name.lower().endswith(".gguf"):
-            cls = core_nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderGGUF")
-            if cls is None:
-                raise RuntimeError(
-                    "ComfyUI-GGUF not loaded - install/enable it and restart.")
-            return cls().load_clip(clip_name, type)
-        return core_nodes.CLIPLoader().load_clip(clip_name, type=type)
+        if not clip_name.lower().endswith(".gguf"):
+            return core_nodes.CLIPLoader().load_clip(clip_name, type=type)
+
+        gg_cls = core_nodes.NODE_CLASS_MAPPINGS.get("CLIPLoaderGGUF")
+        if gg_cls is None:
+            raise RuntimeError(
+                "ComfyUI-GGUF not loaded - install/enable it and restart.")
+        gg = sys.modules[gg_cls.__module__]
+        # gguf_mmproj_loader lives in their loader module, which nodes.py
+        # does not re-export - resolve it from where gguf_clip_loader is
+        # actually defined.
+        gg_loader = sys.modules[gg.gguf_clip_loader.__module__]
+
+        import folder_paths
+        import comfy.sd
+        import comfy.model_management
+        clip_path = folder_paths.get_full_path("clip", clip_name)
+
+        # --- text side: their mapper, then truncate to the official H3
+        # shape (Qwen3-VL-32B cut to 50 layers; no final norm, no lm_head).
+        sd = gg.gguf_clip_loader(clip_path)
+        drop = re.compile(r"model\.layers\.(5[0-9]|6[0-9])\.")
+        sd = {k: v for k, v in sd.items()
+              if not drop.match(k) and k not in ("model.norm.weight",
+                                                 "lm_head.weight")}
+
+        # --- vision side: their sidecar loader, then correct the names to
+        # H3's layout (their map is qwen2vl-era: wrong merger keys, missing
+        # deepstack and qkv rules).
+        vsd = gg_loader.gguf_mmproj_loader(clip_path)
+        if not vsd:
+            raise RuntimeError(
+                f"No -mmproj sidecar found next to '{clip_name}'. The H3 "
+                f"encoder NEEDS its vision tower (image refs / chaining) - "
+                f"keep the mmproj file in the same folder.")
+        # merger mlp indices -> linear_fc1/2 by ascending index
+        idxs = sorted({m.group(1) for k in vsd
+                       for m in [re.match(r"visual\.merger\.mlp\.(\d+)\.", k)]
+                       if m})
+        # deepstack mergers: llama.cpp indexes them by the vision layer they
+        # tap (8/16/24), the H3 encoder by list position (0/1/2) - remap
+        # ascending, and sort NUMERICALLY (lexically 16 < 8).
+        ds = sorted({int(m.group(1)) for k in vsd
+                     for m in [re.match(r"v\.deepstack\.(\d+)\.", k)]
+                     if m})
+        fixed = {}
+        for k, v in vsd.items():
+            for i, name in zip(idxs, ("linear_fc1", "linear_fc2")):
+                k = k.replace(f"visual.merger.mlp.{i}.",
+                              f"visual.merger.{name}.")
+            for pos, layer in enumerate(ds):
+                k = k.replace(f"v.deepstack.{layer}.",
+                              f"visual.deepstack_merger_list.{pos}.")
+            for a, b in self._VISION_FIXES:
+                k = k.replace(a, b)
+            fixed[k] = v
+        sd.update(fixed)
+
+        clip = comfy.sd.load_text_encoder_state_dicts(
+            clip_type=getattr(comfy.sd.CLIPType, type.upper(),
+                              comfy.sd.CLIPType.STABLE_DIFFUSION),
+            state_dicts=[sd],
+            model_options={
+                "custom_operations": gg.GGMLOps,
+                "initial_device":
+                    comfy.model_management.text_encoder_offload_device(),
+            },
+            embedding_directory=folder_paths.get_folder_paths("embeddings"),
+        )
+        clip.patcher = gg.GGUFModelPatcher.clone(clip.patcher)
+        return (clip,)
 
 
 class H3AudioTrimStart:
@@ -232,6 +311,13 @@ class H3MultishotSampler:
                              "max": 0xffffffffffffffff,
                              "control_after_generate": True}),
             "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+        },
+        "optional": {
+            "start_image": ("IMAGE", {
+                "tooltip": "Optional first frame (I2V). Shot 1 starts from this "
+                           "image; later shots continue chaining from the "
+                           "previous shot's last frame as usual. Leave "
+                           "unconnected for pure text-to-video."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -240,7 +326,7 @@ class H3MultishotSampler:
     CATEGORY = "sampling/minimax"
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
-            width, height, frames_per_shot, seed, steps):
+            width, height, frames_per_shot, seed, steps, start_image=None):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
@@ -265,6 +351,13 @@ class H3MultishotSampler:
         frames_parts, audio_parts = [], []
         sr = None
         prev_last = None
+        if start_image is not None:
+            # I2V: seed the chain so shot 1 uses the supplied frame as its
+            # keyframe, exactly the way later shots use the previous shot's
+            # last frame. No seam trim on shot 1 - that frame is wanted.
+            prev_last = start_image[:1]
+            print("[H3Multishot] I2V: shot 1 starts from the supplied image.",
+                  flush=True)
         for si, prompt in enumerate(shots):
             print(f"[H3Multishot] shot {si + 1}/{n} "
                   f"({frames_per_shot}f @ {width}x{height})...", flush=True)
@@ -284,6 +377,27 @@ class H3MultishotSampler:
                     "minimax_keyframes": keyframes,
                     "minimax_frame_count": frame_count,
                 })
+            # --- free the text encoder before the DiT loads -----------------
+            # The 32B VL encoder (~16.5GB even at Q4) and the H3 DiT (~25GB) do
+            # not co-fit on a 32GB card: without this the DiT loads PARTIALLY and
+            # streams ~19GB from system RAM every step (60min vs ~15min renders).
+            # Conditioning is already computed above, so the encoder weights are
+            # safe to evict here; they reload next shot (chained prompts need it).
+            import comfy.model_management as _mm
+            try:
+                clip.patcher.model.to(_mm.text_encoder_offload_device())
+            except Exception as _e:
+                print(f"[H3Multishot] TE offload skipped: {_e}", flush=True)
+            try:
+                _dev = _mm.get_torch_device()
+                _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                _mm.soft_empty_cache()
+                _free = _mm.get_free_memory(_dev) / (1024 ** 3)
+                print(f"[H3Multishot] TE evicted; {_free:.1f} GB free for the DiT",
+                      flush=True)
+            except Exception as _e:
+                print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
+            # ----------------------------------------------------------------
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
             noise = ncs.RandomNoise().get_noise(seed + si)[0]
             out, _denoised = ncs.SamplerCustomAdvanced().sample(
