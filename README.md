@@ -26,6 +26,20 @@ roughly 4x on 32GB cards. See [Changelog](#changelog).
   referencing keeps working.
 - **H3 Shot List** - the same script parser as separate STRING outputs, for
   the expert graph.
+- **H3 Multishot Sampler + Memory (long form)** - for 2-5 minute videos
+  (12-30 shots) where plain chaining drifts. Stock chaining shows each shot ONE
+  image (the previous shot's last frame), so every hop can only see one hop
+  back and identity error compounds. This node splits the two jobs:
+  the **keyframe** stays the most recent frame (seams stay smooth), while the
+  **memory** shown to the encoder is a persistent **anchor** from the start of
+  the piece plus the last N shot-end frames. The anchor never changes, so drift
+  cannot compound. Knobs: `anchor_frames` (1 = on, the long-chain fix) and
+  `memory_frames` (recent frames, 0 = stock behaviour).
+- **H3 Optional Image (I2V on/off)** - a real toggle for an optional image
+  input. A normal switch node cannot express "no image" (both branches are
+  required), so turning I2V off usually ends up feeding a black placeholder
+  frame - which is not text-to-video, it is video that starts from black. This
+  node emits nothing when disabled.
 - **H3 Audio Trim Start** - trim N seconds from the front of an AUDIO clip
   (seam-sync helper for hand-built chains).
 
@@ -57,7 +71,10 @@ Full-precision text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.c
 ## Workflows
 
 - `H3_Multishot_AIO.json` - easy mode: loaders > script > one sampler > save.
-  Add a `LoadImage` into `start_image` for I2V.
+  Ships with a `LoadImage` -> **H3 Optional Image** -> `start_image` chain, so
+  the same graph does T2V and I2V: flip the toggle on to use your frame.
+- `H3_Multishot_MEMORY.json` - long-form mode: the memory sampler with an
+  identity anchor, for 2-5 minute multi-shot pieces.
 - `H3_Multishot_3chain_expert.json` - the same pipeline exploded into three
   visible shot chains for tinkering (fixed 3 shots, per-stage access).
 
@@ -100,6 +117,15 @@ held across both seams. This video was made BY the workflow it demonstrates.
   same render. The node prints `[H3Multishot] TE evicted; NN.N GB free for the
   DiT` each shot so you can confirm it. The encoder reloads per shot (a few
   seconds) because chained prompts need it again - far cheaper than streaming.
+- **Long-form memory sampler (new node).** `H3 Multishot Sampler + Memory`
+  adds a persistent identity anchor plus rolling recent-frame memory, aimed at
+  12-30 shot (2-5 minute) chains where single-frame chaining drifts.
+- **H3 Optional Image (new node).** A genuine on/off for optional image inputs;
+  emits nothing when disabled instead of a placeholder frame.
+- **Script parser now self-repairs.** Long JSON scripts that lose their closing
+  brace/bracket, end on a trailing comma, or have an unterminated string are
+  auto-closed with a console warning instead of failing the render. Genuinely
+  malformed scripts still fail loudly.
 - Docs: linked the encoder GGUF repo and spelled out that **mmproj is required
   for multi-shot**, not just for reference images.
 

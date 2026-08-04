@@ -22,6 +22,17 @@ one node.
   multi-shot actually requires:
   huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF
 
+- **LONG-FORM MEMORY SAMPLER (new).** For 2-5 minute videos. Stock chaining
+  shows each shot one image - the previous shot's last frame - so identity
+  drifts over 12-30 shots. The new sampler keeps a persistent identity ANCHOR
+  from the start of the piece plus the last N shot-end frames, while the
+  keyframe stays the most recent frame so seams stay smooth.
+- **REAL I2V TOGGLE (new).** "H3 Optional Image" emits nothing when disabled -
+  a normal switch node can't express "no image" and ends up feeding a black
+  frame, which silently makes shot 1 start from black.
+- **SCRIPT PARSER SELF-REPAIRS.** A long JSON script missing its closing brace
+  now renders (with a warning) instead of failing.
+
 **What you get**
 - The **H3 Multishot Sampler**: paste a script (one prompt per shot, `---`
   between them), pick a shot count, get a seam-clean master with continuous

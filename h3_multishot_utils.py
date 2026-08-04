@@ -13,24 +13,88 @@ import json
 import re
 
 
+
+def _repair_json(text):
+    """Parse JSON, auto-closing unterminated brackets/quotes.
+
+    Long multi-prompt scripts get truncated or lose their final brace all the
+    time (a 4,500-char script with the closing '}' missing is not a typo the
+    author can see). Returns (data, note): data is None on real failure and
+    note carries the error; note is a description when a repair was applied,
+    or "" when the text parsed clean.
+    """
+    try:
+        return json.loads(text), ""
+    except json.JSONDecodeError as e:
+        first_err = str(e)   # bind now; Python clears the except-name on exit
+
+    # walk the text tracking string state, then close what is still open
+    stack, in_str, esc = [], False, False
+    for ch in text:
+        if in_str:
+            if esc:
+                esc = False
+            elif ch == "\\":
+                esc = True
+            elif ch == '"':
+                in_str = False
+            continue
+        if ch == '"':
+            in_str = True
+        elif ch in "{[":
+            stack.append(ch)
+        elif ch in "}]":
+            if stack and ((ch == "}" and stack[-1] == "{") or
+                          (ch == "]" and stack[-1] == "[")):
+                stack.pop()
+
+    candidate = text.rstrip()
+    fixes = []
+    if in_str:
+        candidate += '"'
+        fixes.append("closed an open string")
+    if candidate.endswith(","):
+        candidate = candidate[:-1]
+        fixes.append("dropped a trailing comma")
+    # trailing comma before a closer, e.g.  ["a","b",]  or  {"k":1,}
+    cleaned = re.sub(r",(\s*[\]}])", r"\1", candidate)
+    if cleaned != candidate:
+        candidate = cleaned
+        fixes.append("removed comma(s) before a closing bracket")
+    for opener in reversed(stack):
+        candidate += "}" if opener == "{" else "]"
+    if stack:
+        fixes.append("added " + "".join("}" if o == "{" else "]"
+                                        for o in reversed(stack)))
+    if not fixes:
+        return None, first_err
+    try:
+        return json.loads(candidate), ", ".join(fixes)
+    except json.JSONDecodeError as e:
+        return None, str(e)
+
+
 def _parse_script(text):
     """JoyEcho script -> list of shot prompts. JSON {"prompts": [...]} or
     plain text with --- separators. Malformed JSON fails LOUD."""
     text = (text or "").strip()
     shots = []
     if text.startswith("{") or text.startswith("["):
-        try:
-            data = json.loads(text)
-            if isinstance(data, dict):
-                shots = [str(p) for p in data.get("prompts", [])]
-            elif isinstance(data, list):
-                shots = [str(p) for p in data]
-        except json.JSONDecodeError as e:
+        data, repaired = _repair_json(text)
+        if data is None:
             raise ValueError(
-                f"H3 script looks like JSON but does not parse ({e}). "
-                f"Common cause: a doubled {{ on the first lines, or a "
-                f"missing comma/quote. Fix the script or use plain prompts "
-                f"separated by --- lines.")
+                f"H3 script looks like JSON but does not parse ({repaired}). "
+                f"Auto-repair of unclosed brackets/quotes was attempted and "
+                f"failed. Common cause: a doubled {{ on the first lines, or a "
+                f"missing comma between prompts. Fix the script or use plain "
+                f"prompts separated by --- lines.")
+        if repaired:
+            print(f"[H3Multishot] script JSON was incomplete; auto-repaired "
+                  f"({repaired}). Consider fixing the source.", flush=True)
+        if isinstance(data, dict):
+            shots = [str(p) for p in data.get("prompts", [])]
+        elif isinstance(data, list):
+            shots = [str(p) for p in data]
     if not shots:
         shots = [b.strip().replace('\\"', '"')
                  for b in re.split(r"(?m)^---\s*$", text) if b.strip()]
@@ -429,14 +493,233 @@ class H3MultishotSampler:
         return (master, {"waveform": waveform, "sample_rate": sr}, n)
 
 
+
+class H3MultishotMemorySampler:
+    """Long-form multishot with a memory bank.
+
+    Stock chaining shows each shot exactly ONE image: the previous shot's last
+    frame. Over 12-30 shots (2-5 minute videos) identity drifts, because every
+    hop can only see one hop back.
+
+    This node separates two jobs that stock chaining conflates:
+
+      * KEYFRAME - what the video physically continues from (always the most
+                   recent frame, so seams stay smooth).
+      * MEMORY   - what the encoder LOOKS AT for identity/context: a persistent
+                   anchor from the start of the piece plus the last N shot-end
+                   frames. The anchor never changes, so drift cannot compound.
+
+    H3's encoder takes multiple images natively (<Picture 1..N>), so this uses
+    the model's own mechanism, just deeper.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "clip": ("CLIP",),
+            "video_vae": ("VAE",),
+            "audio_vae": ("VAE",),
+            "script": ("STRING", {
+                "multiline": True, "dynamicPrompts": False,
+                "default": "Shot 1 prompt goes here.\n---\nShot 2 prompt goes here.",
+                "tooltip": "One prompt per shot, '---' between shots."}),
+            "shot_count": ("INT", {"default": 0, "min": 0, "max": 64,
+                "tooltip": "0 = one shot per prompt in the script."}),
+            "width": ("INT", {"default": 960, "min": 32, "max": 4096, "step": 16}),
+            "height": ("INT", {"default": 544, "min": 32, "max": 4096, "step": 16}),
+            "frames_per_shot": ("INT", {"default": 243, "min": 5, "max": 1000,
+                "tooltip": "Snaps to H3's 17k+5 grid. 243 = ~10.1s @24fps."}),
+            "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
+            "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+            "memory_frames": ("INT", {"default": 2, "min": 0, "max": 6,
+                "tooltip": "Recent shot-end frames the encoder sees. 0 = stock."}),
+            "anchor_frames": ("INT", {"default": 1, "min": 0, "max": 2,
+                "tooltip": "Persistent frame(s) from the START, shown to every "
+                           "shot. This is what stops identity drift on long "
+                           "chains. 0 = disabled."}),
+        }, "optional": {
+            "start_image": ("IMAGE", {
+                "tooltip": "Optional first frame (I2V). Also becomes the identity "
+                           "anchor when anchor_frames > 0."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
+    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered")
+    FUNCTION = "run"
+    CATEGORY = "sampling/minimax"
+
+    def run(self, model, clip, video_vae, audio_vae, script, shot_count, width,
+            height, frames_per_shot, seed, steps, memory_frames, anchor_frames,
+            start_image=None):
+        import torch
+        import node_helpers
+        from comfy_extras import nodes_custom_sampler as ncs
+        from comfy_extras import nodes_minimax_h3 as mmh3
+        import comfy.model_management as _mm
+
+        shots = _parse_script(script)
+        n = shot_count if shot_count > 0 else len(shots)
+        if len(shots) > n:
+            shots = shots[:n]
+        while len(shots) < n:
+            shots.append(shots[-1])
+
+        sigmas = ncs.BasicScheduler().get_sigmas(model, "simple", steps, 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler("res_multistep")[0]
+
+        frames_parts, audio_parts = [], []
+        sr = None
+        history = []
+        anchor = start_image[:1] if start_image is not None else None
+        if anchor is not None:
+            print("[H3Memory] I2V: shot 1 starts from the supplied image; it is "
+                  "also the identity anchor.", flush=True)
+
+        for si, prompt in enumerate(shots):
+            ctx = []
+            if anchor is not None and anchor_frames > 0:
+                ctx.append(anchor)
+            if history:
+                take = memory_frames if memory_frames > 0 else 1
+                ctx.extend(history[-take:])
+            images = [mmh3._resize(c[:1], width, height, "disabled") for c in ctx]
+
+            print("[H3Memory] shot %d/%d (%df @ %dx%d) | memory: %d frame(s) "
+                  "(anchor=%s, recent=%d)" % (
+                      si + 1, n, frames_per_shot, width, height, len(images),
+                      "yes" if (anchor is not None and anchor_frames > 0) else "no",
+                      min(memory_frames, len(history)) if memory_frames > 0
+                      else min(1, len(history))), flush=True)
+
+            latent, frame_count = mmh3._empty_av_latent(width, height,
+                                                        frames_per_shot)
+            keyframes = []
+            cont = history[-1] if history else anchor
+            if cont is not None:
+                kf = mmh3._resize(cont[:1], width, height, "disabled")
+                keyframes.append({"resolved_frame_index": 0, "image": kf})
+
+            tokens = clip.tokenize(prompt, images=images)
+            cond = clip.encode_from_tokens_scheduled(tokens)
+            if keyframes:
+                for kf_ in keyframes:
+                    kf_["latent"] = video_vae.encode(kf_.pop("image"))
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_keyframes": keyframes,
+                    "minimax_frame_count": frame_count,
+                })
+
+            try:
+                clip.patcher.model.to(_mm.text_encoder_offload_device())
+            except Exception:
+                pass
+            try:
+                _dev = _mm.get_torch_device()
+                _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                _mm.soft_empty_cache()
+                print("[H3Memory] TE evicted; %.1f GB free for the DiT"
+                      % (_mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
+            except Exception:
+                pass
+
+            guider = ncs.BasicGuider().get_guider(model, cond)[0]
+            noise = ncs.RandomNoise().get_noise(seed + si)[0]
+            out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                noise, guider, sampler, sigmas, latent)
+
+            lat = out["samples"]
+            if getattr(lat, "is_nested", False):
+                lat = lat.unbind()[0]
+            imgs = video_vae.decode(lat)
+            if imgs.ndim == 5:
+                imgs = imgs.reshape(-1, imgs.shape[-3], imgs.shape[-2],
+                                    imgs.shape[-1])
+            aud = vae_decode_audio(audio_vae, out)
+            sr = aud["sample_rate"]
+            wav = aud["waveform"]
+
+            if anchor is None and anchor_frames > 0:
+                anchor = imgs[:1].clone()
+                print("[H3Memory] identity anchor set from shot 1 frame 1.",
+                      flush=True)
+            history.append(imgs[-1:].clone())
+            if len(history) > 8:
+                history.pop(0)
+
+            if si > 0:
+                imgs = imgs[1:]
+                trim = int(round(sr / 24.0))
+                wav = wav[..., trim:]
+            frames_parts.append(imgs.cpu())
+            audio_parts.append(wav.cpu())
+
+        master = torch.cat(frames_parts, dim=0)
+        waveform = torch.cat(audio_parts, dim=-1)
+        print("[H3Memory] done: %d shots, %d frames (~%.1fs)." % (
+            n, master.shape[0], master.shape[0] / 24.0), flush=True)
+        return (master, {"waveform": waveform, "sample_rate": sr}, n)
+
+
+
+class H3OptionalImage:
+    """An on/off gate for an OPTIONAL image input.
+
+    A normal switch node cannot express "no image": both of its branches are
+    required, so turning I2V "off" ends up feeding a placeholder (usually a
+    black EmptyImage) into start_image - which is not text-to-video, it is
+    video that starts from a black frame.
+
+    This node passes the image through when enabled, and emits nothing (None)
+    when disabled, which is exactly what an optional input expects.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "enabled": ("BOOLEAN", {
+                    "default": True, "label_on": "image ON",
+                    "label_off": "no image (T2V)",
+                    "tooltip": "Off = emits nothing, so the downstream optional "
+                               "input behaves as if it were unconnected."}),
+            },
+            "optional": {
+                "image": ("IMAGE", {"tooltip": "Image to pass through when enabled."}),
+            },
+        }
+
+    RETURN_TYPES = ("IMAGE",)
+    RETURN_NAMES = ("image",)
+    FUNCTION = "gate"
+    CATEGORY = "utils/minimax"
+    DESCRIPTION = ("Pass an image through, or nothing at all. Use to toggle an "
+                   "optional input such as start_image (I2V) without feeding a "
+                   "placeholder frame.")
+
+    def gate(self, enabled, image=None):
+        if not enabled:
+            print("[H3OptionalImage] disabled - passing nothing (T2V).",
+                  flush=True)
+            return (None,)
+        if image is None:
+            print("[H3OptionalImage] enabled but no image connected - passing "
+                  "nothing.", flush=True)
+        return (image,)
+
+
 NODE_CLASS_MAPPINGS = {"H3ScriptSplit": H3ScriptSplit,
                        "H3ModelLoaderAny": H3ModelLoaderAny,
                        "H3ClipLoaderAny": H3ClipLoaderAny,
                        "H3AudioTrimStart": H3AudioTrimStart,
-                       "H3MultishotSampler": H3MultishotSampler}
+                       "H3MultishotSampler": H3MultishotSampler,
+                       "H3MultishotMemorySampler": H3MultishotMemorySampler,
+                       "H3OptionalImage": H3OptionalImage}
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ScriptSplit": "H3 Shot List",
     "H3ModelLoaderAny": "H3 Model Loader (safetensors + GGUF)",
     "H3ClipLoaderAny": "H3 CLIP Loader (safetensors + GGUF)",
     "H3AudioTrimStart": "H3 Audio Trim Start",
-    "H3MultishotSampler": "H3 Multishot Sampler (one node)"}
+    "H3MultishotSampler": "H3 Multishot Sampler (one node)",
+    "H3MultishotMemorySampler": "H3 Multishot Sampler + Memory (long form)",
+    "H3OptionalImage": "H3 Optional Image (I2V on/off)"}

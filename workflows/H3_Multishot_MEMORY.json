@@ -1,8 +1,8 @@
 {
   "id": "h3-multishot-aio",
   "revision": 0,
-  "last_node_id": 17,
-  "last_link_id": 17,
+  "last_node_id": 18,
+  "last_link_id": 11,
   "nodes": [
     {
       "id": 6,
@@ -16,7 +16,7 @@
         110
       ],
       "flags": {},
-      "order": 9,
+      "order": 10,
       "mode": 0,
       "inputs": [
         {
@@ -84,7 +84,7 @@
         106
       ],
       "flags": {},
-      "order": 10,
+      "order": 11,
       "mode": 0,
       "inputs": [
         {
@@ -375,8 +375,68 @@
       ]
     },
     {
+      "id": 12,
+      "type": "LoadImage",
+      "pos": [
+        -970.1188872591243,
+        -24.143760812662002
+      ],
+      "size": [
+        282.798828125,
+        314
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "choose file to upload",
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            10
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
       "id": 5,
-      "type": "H3MultishotSampler",
+      "type": "H3MultishotMemorySampler",
       "pos": [
         -229.92430446975905,
         -29.590747772565894
@@ -386,7 +446,7 @@
         652.7466309284491
       ],
       "flags": {},
-      "order": 8,
+      "order": 9,
       "mode": 0,
       "inputs": [
         {
@@ -418,7 +478,7 @@
           "name": "start_image",
           "shape": 7,
           "type": "IMAGE",
-          "link": 17
+          "link": 11
         },
         {
           "localized_name": "script",
@@ -508,121 +568,76 @@
           "links": []
         }
       ],
-      "title": "H3 Multishot Sampler",
+      "title": "H3 Multishot Sampler + Memory (long form)",
       "properties": {
-        "Node name for S&R": "H3MultishotSampler"
+        "Node name for S&R": "H3MultishotMemorySampler"
       },
       "widgets_values": [
         "A woman sits at a sunlit desk in a home office, speaking to the camera. She says, \"This is multi-shot for MiniMax H3.\" Warm window light, plants and a monitor behind her. Natural room tone, her voice close on the mic.\n---\nThe same woman at the same desk continues, saying, \"One script, one node, and every shot flows into the next.\" She gestures at the screen beside her. Same warm light, same room, unbroken continuity.\n---\nThe same woman leans back and finishes, saying, \"Audio carries across the seams too.\" She smiles and the shot settles. Same room, same light, room tone continuous.",
         0,
-        608,
-        352,
-        362,
-        217270550978761,
+        960,
+        544,
+        243,
+        1001719139413070,
         "randomize",
-        16
-      ]
-    },
-    {
-      "id": 12,
-      "type": "LoadImage",
-      "pos": [
-        -975.4299834793115,
-        99.07367149567777
-      ],
-      "size": [
-        282.798828125,
-        314
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "image",
-          "name": "image",
-          "type": "COMBO",
-          "widget": {
-            "name": "image"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "choose file to upload",
-          "name": "upload",
-          "type": "IMAGEUPLOAD",
-          "widget": {
-            "name": "upload"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "IMAGE",
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            16
-          ]
-        },
-        {
-          "localized_name": "MASK",
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.30.0",
-        "Node name for S&R": "LoadImage"
-      },
-      "widgets_values": [
-        "example.png",
-        "image"
+        20,
+        2,
+        1
       ]
     },
     {
       "id": 17,
-      "type": "H3OptionalImage",
+      "type": "MarkdownNote",
       "pos": [
-        -967.104501465949,
-        -11.423858405561937
+        -659.924304469759,
+        -69.59074777256589
       ],
       "size": [
-        270.7258054913775,
-        68.62219244037408
+        400,
+        320
       ],
       "flags": {},
-      "order": 7,
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "properties": {},
+      "widgets_values": [
+        "## Long-form multishot (memory)\n\nFor 2-5 minute videos (12-30 shots), where stock chaining drifts.\n\n**Stock chaining** shows each shot ONE image: the previous shot's last frame. Every hop can only see one hop back, so identity drifts and the error compounds.\n\n**This node splits the two jobs:**\n\n- **keyframe** - what the video continues from (always the most recent frame, so seams stay smooth)\n- **memory** - what the encoder *looks at*: a persistent **anchor** from the start of the piece + the last N shot-end frames\n\nThe anchor never changes, so drift cannot compound.\n\n### Knobs\n- `anchor_frames` **1** = identity anchor on (the fix for long chains). 0 = off.\n- `memory_frames` **2** = how many recent frames the encoder also sees. 0 = stock behaviour.\n\n### Notes\n- Connect a `LoadImage` to `start_image` for I2V; it also becomes the anchor.\n- Render at native resolution (960x544) and upscale after. Native 1920x1088 scored *worse* in blind review and cost ~4x the time.\n- More memory frames = more vision encoding per shot (slower). Test 1 vs 2 vs 4 before committing to a long run."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 18,
+      "type": "H3OptionalImage",
+      "pos": [
+        -963.737505877744,
+        331.59798092907545
+      ],
+      "size": [
+        280,
+        60
+      ],
+      "flags": {},
+      "order": 0,
       "mode": 0,
       "inputs": [
         {
-          "localized_name": "image",
           "name": "image",
-          "shape": 7,
           "type": "IMAGE",
-          "link": 16
-        },
-        {
-          "localized_name": "enabled",
-          "name": "enabled",
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "enabled"
-          },
-          "link": null
+          "link": 10,
+          "shape": 7
         }
       ],
       "outputs": [
         {
-          "localized_name": "image",
           "name": "image",
           "type": "IMAGE",
           "links": [
-            17
-          ]
+            11
+          ],
+          "slot_index": 0
         }
       ],
       "properties": {
@@ -630,7 +645,8 @@
       },
       "widgets_values": [
         false
-      ]
+      ],
+      "title": "Enable I2V"
     }
   ],
   "links": [
@@ -691,21 +707,32 @@
       "CLIP"
     ],
     [
-      16,
+      10,
       12,
       0,
-      17,
+      18,
       0,
       "IMAGE"
     ],
     [
-      17,
-      17,
+      11,
+      18,
       0,
       5,
       4,
       "IMAGE"
     ]
+  ],
+  "floatingLinks": [
+    {
+      "id": 1,
+      "origin_id": -1,
+      "origin_slot": -1,
+      "target_id": 14,
+      "target_slot": 0,
+      "type": "IMAGE",
+      "parentId": 1
+    }
   ],
   "groups": [
     {
@@ -724,12 +751,26 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.941425233644872,
+      "scale": 1.2530369859813242,
       "offset": [
-        1204.5805533773912,
-        398.51169003884326
+        618.7968697974885,
+        63.417122099044605
       ]
-    }
+    },
+    "linkExtensions": [],
+    "reroutes": [
+      {
+        "id": 1,
+        "pos": [
+          -1041.7641394052794,
+          345.39911542145944
+        ],
+        "linkIds": [],
+        "floating": {
+          "slotType": "input"
+        }
+      }
+    ]
   },
   "version": 0.4
 }
