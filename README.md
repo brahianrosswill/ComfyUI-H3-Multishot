@@ -13,8 +13,10 @@ See [Changelog](#changelog).
 - **H3 Keyframes (any position)** - anchor images anywhere in the clip, not
   just the first and last frame. Stock ComfyUI raises `only first/last keyframe
   anchors are supported`; that is a positional-maths limit, not a model limit
-  (see the changelog). Up to 6 anchors, positioned as fractions (`0, 0.5, 1`)
-  or absolute frame indices.
+  (see the changelog). Six anchor slots plus an unbounded `images_batch`, each
+  positioned as a percentage (`0%, 50%, 100%`), an absolute frame index (`0, 121,
+  242`), or an inclusive range (`0-9, 352-361`). A descending range such as
+  `30%-20%` reverses that section of the batch.
 - **H3 Condition Strength** - how strongly keyframe/reference conditioning is
   trusted. Exposes `minimax_visual_cond_noise_aug` and
   `minimax_audio_cond_noise_aug`, which ComfyUI core reads but no stock node
@@ -125,6 +127,40 @@ held across both seams. This video was made BY the workflow it demonstrates.
   memory for long-form chains.
 
 ## Changelog
+
+### v1.3
+
+- **Hard mode ships.** `H3_HardMode_R2V.json` - identity from reference material
+  instead of a start frame. See the workflow list above.
+- **Keyframe positions take percentages and ranges.** Contributed by
+  [@viralesveras](https://github.com/viralesveras) in
+  [#4](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot/pull/4). Previously a
+  bare `1` meant *the last frame*, not frame 1, so addressing an early frame
+  absolutely required writing `1.0001` - which is how the ambiguity was found.
+
+      0%, 50%, 100%     percentages
+      0, 121, 242       absolute frame indices
+      0-9, 352-361      inclusive ranges
+      30%-20%           descending: reverses that section of the batch
+
+  **Existing workflows keep working.** A bare non-integer at or below 1.0 is
+  unambiguous - nobody means "frame index 0.5" - so a plain list containing one
+  is read the old way and logs the percentage spelling to switch to. An
+  all-integer `0, 1` is genuinely ambiguous, so it takes the new absolute meaning
+  and warns rather than silently anchoring a different frame.
+- **`images_batch` on the keyframe node.** Also from @viralesveras, in
+  [#2](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot/pull/2), for when six
+  slots is not enough - several frames at each end to pin complex motion, or a
+  set of frames kept from a source video. It **adds to** the six individual
+  slots; as originally merged it replaced them, which silently dropped `image_1`.
+- **Loaders find GGUFs in subfolders.** Both model loaders scanned only the top
+  level of `diffusion_models` / `text_encoders`, so a file under `gguf/` was
+  invisible in the dropdown while ComfyUI-GGUF's own loader listed it fine. The
+  scan exists because `.gguf` is not in `supported_pt_extensions`; it simply was
+  not recursive.
+- **`ref_image_size` documented from measurement.** The note repeated core's
+  "can be several times slower" tooltip. Measured: **1.24-1.38x**, and `max` did
+  not improve identity at either resolution tested.
 
 ### v1.2
 
