@@ -92,6 +92,18 @@ Full-precision text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.c
   identity anchor, for 2-5 minute multi-shot pieces.
 - `H3_Keyframes.json` - **keyframes anywhere**, single pass. One generation,
   so the audio is one continuous stream with no seams.
+- `H3_HardMode_R2V.json` - **hard mode**: identity from reference material
+  instead of a start frame, using core's `ref2va` path. Takes up to 9 images,
+  3 videos with soundtracks and 3 standalone voice clips, and you address them
+  from the prompt as `<Picture 1>`, `<Video 1>`, `<Audio 1>`. Needs a `ref2va`
+  model file, not `fl2va`.
+  References and keyframes are **mutually exclusive** - core assigns rather than
+  merges the two, so asking for both does not degrade, it crashes; the note
+  inside the graph explains which to reach for. Reference audio must be stereo,
+  which the included guard node enforces. Ships with the audio branch muted and
+  the image slots on ComfyUI's bundled `example.png`, so it loads clean and you
+  swap your own material in. Measured: 124 frames at 480x864 in 7.5 min on a
+  24 GB card with a `ref2va` Q4_0 GGUF.
 
 ## Sample
 
@@ -108,8 +120,9 @@ held across both seams. This video was made BY the workflow it demonstrates.
   1920x1088 measured *worse* than 960x544 in blind review (softer detail, and
   it reads as an upscale) while costing ~4x the time. Render native, then
   upscale in pixel space.
-- Roadmap: ref2va reference conditioning (identity images + voice clips) and a
-  deeper multi-frame memory for long-form chains, in a hard-mode sampler.
+- ref2va reference conditioning (identity images + voice clips) has landed - see
+  `H3_HardMode_R2V.json` above. Still on the roadmap: a deeper multi-frame
+  memory for long-form chains.
 
 ## Changelog
 
