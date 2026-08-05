@@ -192,12 +192,19 @@ class H3ModelLoaderAny:
     @classmethod
     def INPUT_TYPES(cls):
         import folder_paths
+        import os
         files = folder_paths.get_filename_list("diffusion_models")
         gguf = []
         for d in folder_paths.get_folder_paths("diffusion_models"):
-            import os
-            if os.path.isdir(d):
-                gguf += [f for f in os.listdir(d) if f.lower().endswith(".gguf")]
+            if not os.path.isdir(d):
+                continue
+            # RECURSIVE: .gguf is not in supported_pt_extensions so
+            # get_filename_list never returns it, and a flat listdir misses
+            # anything filed under diffusion_models/gguf/.
+            for root, _dirs, fs in os.walk(d):
+                for f in fs:
+                    if f.lower().endswith(".gguf"):
+                        gguf.append(os.path.relpath(os.path.join(root, f), d))
         names = sorted(set(files) | set(gguf))
         return {"required": {"model_name": (names, {
             "tooltip": "safetensors or GGUF - loader routes automatically."})}}
@@ -234,10 +241,13 @@ class H3ClipLoaderAny:
         import folder_paths
         files = set(folder_paths.get_filename_list("text_encoders"))
         for d in folder_paths.get_folder_paths("text_encoders"):
-            if os.path.isdir(d):
-                files |= {f for f in os.listdir(d)
-                          if f.lower().endswith(".gguf")
-                          and "mmproj" not in f.lower()}
+            if not os.path.isdir(d):
+                continue
+            # RECURSIVE, same reason as the model loader above.
+            for root, _dirs, fs in os.walk(d):
+                for f in fs:
+                    if f.lower().endswith(".gguf") and "mmproj" not in f.lower():
+                        files.add(os.path.relpath(os.path.join(root, f), d))
         import nodes as core_nodes
         types = core_nodes.CLIPLoader.INPUT_TYPES()["required"]["type"]
         return {"required": {
