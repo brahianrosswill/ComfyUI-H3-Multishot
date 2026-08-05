@@ -4,8 +4,8 @@ Multishot video+audio generation for **MiniMax-H3** in ComfyUI: one script,
 N chained shots, one seam-clean master. Plus a dual-format model loader
 (safetensors + GGUF) and the GGUF architecture patch H3 needs.
 
-**v1.2** - keyframes at **any** position (not just first/last), hard-mode
-reference-to-video, and two controls ComfyUI reads but no stock node sets.
+**v1.3** - keyframe positions as percentages and ranges, an unbounded image
+batch, and two controls ComfyUI reads but no stock node sets.
 See [Changelog](#changelog).
 
 ## Nodes
@@ -94,18 +94,6 @@ Full-precision text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.c
   identity anchor, for 2-5 minute multi-shot pieces.
 - `H3_Keyframes.json` - **keyframes anywhere**, single pass. One generation,
   so the audio is one continuous stream with no seams.
-- `H3_HardMode_R2V.json` - **hard mode**: identity from reference material
-  instead of a start frame, using core's `ref2va` path. Takes up to 9 images,
-  3 videos with soundtracks and 3 standalone voice clips, and you address them
-  from the prompt as `<Picture 1>`, `<Video 1>`, `<Audio 1>`. Needs a `ref2va`
-  model file, not `fl2va`.
-  References and keyframes are **mutually exclusive** - core assigns rather than
-  merges the two, so asking for both does not degrade, it crashes; the note
-  inside the graph explains which to reach for. Reference audio must be stereo,
-  which the included guard node enforces. Ships with the audio branch muted and
-  the image slots on ComfyUI's bundled `example.png`, so it loads clean and you
-  swap your own material in. Measured: 124 frames at 480x864 in 7.5 min on a
-  24 GB card with a `ref2va` Q4_0 GGUF.
 
 ## Sample
 
@@ -122,16 +110,13 @@ held across both seams. This video was made BY the workflow it demonstrates.
   1920x1088 measured *worse* than 960x544 in blind review (softer detail, and
   it reads as an upscale) while costing ~4x the time. Render native, then
   upscale in pixel space.
-- ref2va reference conditioning (identity images + voice clips) has landed - see
-  `H3_HardMode_R2V.json` above. Still on the roadmap: a deeper multi-frame
-  memory for long-form chains.
+- Roadmap: ref2va reference conditioning (identity images + voice clips) and a
+  deeper multi-frame memory for long-form chains, in a hard-mode sampler.
 
 ## Changelog
 
 ### v1.3
 
-- **Hard mode ships.** `H3_HardMode_R2V.json` - identity from reference material
-  instead of a start frame. See the workflow list above.
 - **Keyframe positions take percentages and ranges.** Contributed by
   [@viralesveras](https://github.com/viralesveras) in
   [#4](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot/pull/4). Previously a
@@ -158,9 +143,6 @@ held across both seams. This video was made BY the workflow it demonstrates.
   invisible in the dropdown while ComfyUI-GGUF's own loader listed it fine. The
   scan exists because `.gguf` is not in `supported_pt_extensions`; it simply was
   not recursive.
-- **`ref_image_size` documented from measurement.** The note repeated core's
-  "can be several times slower" tooltip. Measured: **1.24-1.38x**, and `max` did
-  not improve identity at either resolution tested.
 
 ### v1.2
 
