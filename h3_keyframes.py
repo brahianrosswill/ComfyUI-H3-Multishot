@@ -41,24 +41,88 @@ except ImportError:
 
 MAX_SLOTS = 6
 
-
 def _parse_positions(text, frame_count):
-    """'0, 0.5, 1' -> frame indices. <=1.0 is a fraction, >1.0 is a frame index."""
+    """Parse comma/semicolon separated frame positions.
+
+    Entries ending with '%' are percentages (0-100).
+    Entries without '%' are absolute frame indices.
+
+    Inclusive ranges may be specified with '-', for example:
+
+        2-5
+        5-2
+        50%-60%
+        60%-50%
+
+    Examples:
+        "0,2-5,50%-60%,80%,100%"
+        "10,20-15,75%-50%"
+    """
+
+    #Subfunction to parse an individual absolute or percentage index
+    def parse_value(tok):
+        """Return (value, is_percent) without converting to a frame index."""
+        tok = tok.strip()
+        is_pct = tok.endswith("%")
+        if is_pct:
+            tok = tok[:-1]
+
+        try:
+            value = float(tok)
+        except ValueError:
+            raise ValueError(f"'{tok}' in positions is not a number")
+
+        if value < 0:
+            raise ValueError(f"position {tok} is negative")
+
+        return value, is_pct
+
+    #Subfunction to convert an individual value to an index. 
+    def value_to_index(value, is_pct):
+        """Convert a validated value to a clamped frame index."""
+        if is_pct:
+            idx = int(round((value / 100) * (frame_count - 1)))
+        else:
+            idx = int(round(value))
+
+        return max(0, min(frame_count - 1, idx))
+
     out = []
+
+    #Parse each entry, knowing it might be an inclusive range, 
+    #in which case, expand that range into a simple list.
     for tok in text.replace(";", ",").split(","):
         tok = tok.strip()
         if not tok:
             continue
-        try:
-            v = float(tok)
-        except ValueError:
-            raise ValueError(f"'{tok}' in positions is not a number")
-        if v < 0:
-            raise ValueError(f"position {tok} is negative")
-        idx = int(round(v * (frame_count - 1))) if v <= 1.0 else int(round(v))
-        out.append(max(0, min(frame_count - 1, idx)))
-    return out
 
+        if "-" in tok:
+            parts = tok.split("-")
+            if len(parts) != 2:
+                raise ValueError(f"invalid range '{tok}'")
+
+            left, right = (p.strip() for p in parts)
+
+            start_value, start_pct = parse_value(left)
+            end_value, end_pct = parse_value(right)
+
+            if start_pct != end_pct:
+                raise ValueError(
+                    f"range '{tok}' mixes percentages and frame indices; "
+                    "both ends of a range must either have '%' or neither."
+                )
+
+            start = value_to_index(start_value, start_pct)
+            end = value_to_index(end_value, end_pct)
+
+            step = 1 if start <= end else -1
+            out.extend(range(start, end + step, step))
+
+        else:
+            value, is_pct = parse_value(tok)
+            out.append(value_to_index(value, is_pct))
+
+    return out
 
 class H3Keyframes:
     @classmethod
@@ -86,13 +150,19 @@ class H3Keyframes:
                     "tooltip": "Frames at 24fps, on H3's 17k+5 grid. "
                                "243 = ~10.1s, 362 = trained max ~15.1s."}),
                 "positions": ("STRING", {
-                    "default": "0, 0.5",
+                    "default": "0%, 50%",
                     "tooltip": "One position per connected image, in order. "
-                               "A value of 1.0 or less is a FRACTION of the "
-                               "clip (0 = first frame, 0.5 = halfway, 1 = last). "
-                               "A value above 1 is an absolute frame index. "
-                               "Example: '0, 0.5, 1' anchors the start, the "
-                               "middle and the end."}),
+                               "A value with a % is a FRACTION of the clip "
+                               "(0% = first frame, 50% = halfway, 100% = last). "
+                               "A value without a % is an absolute frame index. "
+                               "Example: '0%, 50%, 100%' anchors the start, the "
+                               "middle and the end. Additionally, position ranges "
+                               "such as '2-5' or '15%-30%' may be specified. "
+                               "Example: '0-3, 10%, 90%-100%'. Ranges may be "
+                               "descending, such as 30%-20%, which would reverse "
+                               "that section of the input image batch. Please note "
+                               "that specifying large numbers of keyframes will "
+                               "massively increase VRAM requirements."}),
             },
             "optional": opt,
         }
@@ -153,7 +223,7 @@ class H3Keyframes:
                 raise ValueError(
                     f"H3 Keyframes: two anchors resolve to the same frame "
                     f"({a}). Move them apart -- at {frame_count} frames, one "
-                    f"frame is {1.0/(frame_count-1):.4f} of the clip.")
+                    f"frame is {100.0/(frame_count-1):.4f}% of the clip.")
 
         interior = [i for i in idxs if i not in (0, frame_count - 1)]
         if interior and not patched:
