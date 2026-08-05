@@ -81,7 +81,7 @@
       ],
       "size": [
         300,
-        106
+        271.6842105263158
       ],
       "flags": {},
       "order": 10,
@@ -190,58 +190,6 @@
       "bgcolor": "#000"
     },
     {
-      "id": 11,
-      "type": "H3ClipLoaderAny",
-      "pos": [
-        -668.0669237077784,
-        148.14167304675712
-      ],
-      "size": [
-        415.6476163194443,
-        88.84285885885879
-      ],
-      "flags": {},
-      "order": 2,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "clip_name",
-          "name": "clip_name",
-          "type": "COMBO",
-          "widget": {
-            "name": "clip_name"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "type",
-          "name": "type",
-          "type": "COMBO",
-          "widget": {
-            "name": "type"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "CLIP",
-          "name": "CLIP",
-          "type": "CLIP",
-          "links": [
-            9
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "H3ClipLoaderAny"
-      },
-      "widgets_values": [
-        "MiniMax-H3-encoder-Q4_K_M.gguf",
-        "minimax"
-      ]
-    },
-    {
       "id": 3,
       "type": "VAELoader",
       "pos": [
@@ -253,7 +201,7 @@
         80
       ],
       "flags": {},
-      "order": 3,
+      "order": 2,
       "mode": 0,
       "inputs": [
         {
@@ -298,7 +246,7 @@
         78.58618618618618
       ],
       "flags": {},
-      "order": 4,
+      "order": 3,
       "mode": 0,
       "inputs": [
         {
@@ -343,7 +291,7 @@
         71.5171171171171
       ],
       "flags": {},
-      "order": 5,
+      "order": 4,
       "mode": 0,
       "inputs": [
         {
@@ -372,6 +320,167 @@
       },
       "widgets_values": [
         "MiniMax-H3-fl2va-Q5_1.gguf"
+      ]
+    },
+    {
+      "id": 12,
+      "type": "LoadImage",
+      "pos": [
+        -975.4299834793115,
+        99.07367149567777
+      ],
+      "size": [
+        282.798828125,
+        314
+      ],
+      "flags": {},
+      "order": 5,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "COMBO",
+          "widget": {
+            "name": "image"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "choose file to upload",
+          "name": "upload",
+          "type": "IMAGEUPLOAD",
+          "widget": {
+            "name": "upload"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "IMAGE",
+          "name": "IMAGE",
+          "type": "IMAGE",
+          "links": [
+            16
+          ]
+        },
+        {
+          "localized_name": "MASK",
+          "name": "MASK",
+          "type": "MASK",
+          "links": null
+        }
+      ],
+      "properties": {
+        "cnr_id": "comfy-core",
+        "ver": "0.30.0",
+        "Node name for S&R": "LoadImage"
+      },
+      "widgets_values": [
+        "example.png",
+        "image"
+      ]
+    },
+    {
+      "id": 17,
+      "type": "H3OptionalImage",
+      "pos": [
+        -967.104501465949,
+        -11.423858405561937
+      ],
+      "size": [
+        270.7258054913775,
+        68.62219244037408
+      ],
+      "flags": {},
+      "order": 7,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "shape": 7,
+          "type": "IMAGE",
+          "link": 16
+        },
+        {
+          "localized_name": "enabled",
+          "name": "enabled",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "enabled"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "image",
+          "name": "image",
+          "type": "IMAGE",
+          "links": [
+            17
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "H3OptionalImage"
+      },
+      "widgets_values": [
+        true
+      ]
+    },
+    {
+      "id": 11,
+      "type": "H3ClipLoaderAny",
+      "pos": [
+        -668.0669237077784,
+        148.14167304675712
+      ],
+      "size": [
+        415.6476163194443,
+        88.84285885885879
+      ],
+      "flags": {},
+      "order": 6,
+      "mode": 0,
+      "inputs": [
+        {
+          "localized_name": "clip_name",
+          "name": "clip_name",
+          "type": "COMBO",
+          "widget": {
+            "name": "clip_name"
+          },
+          "link": null
+        },
+        {
+          "localized_name": "type",
+          "name": "type",
+          "type": "COMBO",
+          "widget": {
+            "name": "type"
+          },
+          "link": null
+        }
+      ],
+      "outputs": [
+        {
+          "localized_name": "CLIP",
+          "name": "CLIP",
+          "type": "CLIP",
+          "links": [
+            9
+          ]
+        }
+      ],
+      "properties": {
+        "Node name for S&R": "H3ClipLoaderAny"
+      },
+      "widgets_values": [
+        "MiniMax-H3-encoder-Q5_K_M.gguf",
+        "minimax"
       ]
     },
     {
@@ -482,6 +591,15 @@
             "name": "steps"
           },
           "link": null
+        },
+        {
+          "localized_name": "seed_per_shot",
+          "name": "seed_per_shot",
+          "type": "BOOLEAN",
+          "widget": {
+            "name": "seed_per_shot"
+          },
+          "link": null
         }
       ],
       "outputs": [
@@ -513,123 +631,15 @@
         "Node name for S&R": "H3MultishotSampler"
       },
       "widgets_values": [
-        "A woman sits at a sunlit desk in a home office, speaking to the camera. She says, \"This is multi-shot for MiniMax H3.\" Warm window light, plants and a monitor behind her. Natural room tone, her voice close on the mic.\n---\nThe same woman at the same desk continues, saying, \"One script, one node, and every shot flows into the next.\" She gestures at the screen beside her. Same warm light, same room, unbroken continuity.\n---\nThe same woman leans back and finishes, saying, \"Audio carries across the seams too.\" She smiles and the shot settles. Same room, same light, room tone continuous.",
+        "Clean modern product video, bright and sharp, shallow depth of field: a locked medium shot of a presenter at a white desk in a small studio, warm daylight from a large window on the left, a soft-glow monitor beside her, plants and acoustic panels behind her. She is an attractive American woman in her mid twenties with warm hazel eyes, a friendly confident smile, light freckles, shoulder-length auburn hair tucked behind one ear, small gold stud earrings, and a relaxed sage-green blouse. Her voice is a clear warm young woman's voice in a casual American accent. She looks into the lens and says, \"This is multishot for MiniMax H3. One script, one node, and every shot flows into the next — with sound.\" Her lips move naturally in tight sync with every word. Quiet room tone, her voice clean and close, a faint keyboard click nearby.\n---\nClean modern product video, bright and sharp, shallow depth of field: the same locked medium shot of the same presenter at the same white desk in the same small studio, warm daylight from the window on the left, the monitor glowing beside her. She is an attractive American woman in her mid twenties with warm hazel eyes, a friendly confident smile, light freckles, shoulder-length auburn hair tucked behind one ear, small gold stud earrings, and a relaxed sage-green blouse. Her voice is a clear warm young woman's voice in a casual American accent. She gestures easily toward the monitor and says, \"Version one point one adds an image start frame, so you can begin from a photo instead of a blank canvas.\" Her lips move naturally in tight sync with every word. Quiet room tone, her voice clean and close, the soft hum of a computer fan.\n---\nClean modern product video, bright and sharp, shallow depth of field: the same locked medium shot of the same presenter at the same white desk in the same small studio, warm daylight from the window on the left, the monitor glowing beside her. She is an attractive American woman in her mid twenties with warm hazel eyes, a friendly confident smile, light freckles, shoulder-length auburn hair tucked behind one ear, small gold stud earrings, and a relaxed sage-green blouse. Her voice is a clear warm young woman's voice in a casual American accent. She leans in slightly, smiles, and says, \"It also runs about four times faster on a thirty-two gig card. Grab the workflow, and go make something strange.\" Her lips move naturally in tight sync with every word. Quiet room tone, her voice clean and close, a light chair shift at the end.",
         0,
-        608,
-        352,
-        362,
-        217270550978761,
+        960,
+        544,
+        243,
+        157987240705331,
         "randomize",
-        16
-      ]
-    },
-    {
-      "id": 12,
-      "type": "LoadImage",
-      "pos": [
-        -975.4299834793115,
-        99.07367149567777
-      ],
-      "size": [
-        282.798828125,
-        314
-      ],
-      "flags": {},
-      "order": 6,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "image",
-          "name": "image",
-          "type": "COMBO",
-          "widget": {
-            "name": "image"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "choose file to upload",
-          "name": "upload",
-          "type": "IMAGEUPLOAD",
-          "widget": {
-            "name": "upload"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "IMAGE",
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            16
-          ]
-        },
-        {
-          "localized_name": "MASK",
-          "name": "MASK",
-          "type": "MASK",
-          "links": null
-        }
-      ],
-      "properties": {
-        "cnr_id": "comfy-core",
-        "ver": "0.30.0",
-        "Node name for S&R": "LoadImage"
-      },
-      "widgets_values": [
-        "example.png",
-        "image"
-      ]
-    },
-    {
-      "id": 17,
-      "type": "H3OptionalImage",
-      "pos": [
-        -967.104501465949,
-        -11.423858405561937
-      ],
-      "size": [
-        270.7258054913775,
-        68.62219244037408
-      ],
-      "flags": {},
-      "order": 7,
-      "mode": 0,
-      "inputs": [
-        {
-          "localized_name": "image",
-          "name": "image",
-          "shape": 7,
-          "type": "IMAGE",
-          "link": 16
-        },
-        {
-          "localized_name": "enabled",
-          "name": "enabled",
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "enabled"
-          },
-          "link": null
-        }
-      ],
-      "outputs": [
-        {
-          "localized_name": "image",
-          "name": "image",
-          "type": "IMAGE",
-          "links": [
-            17
-          ]
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "H3OptionalImage"
-      },
-      "widgets_values": [
-        false
+        20,
+        true
       ]
     }
   ],
@@ -724,10 +734,10 @@
   "config": {},
   "extra": {
     "ds": {
-      "scale": 0.941425233644872,
+      "scale": 0.8558411214953404,
       "offset": [
-        1204.5805533773912,
-        398.51169003884326
+        942.0790553271984,
+        259.0803572885148
       ]
     }
   },

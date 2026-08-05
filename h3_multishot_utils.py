@@ -74,6 +74,37 @@ def _repair_json(text):
         return None, str(e)
 
 
+
+def _xfade_audio(parts, sr, ms=40):
+    """Concatenate shot audio with a short equal-power crossfade at each seam.
+
+    Each shot is sampled independently, so its waveform starts and ends at a
+    hard boundary. Butt-joining them puts a step discontinuity in the signal at
+    every seam, which reads as a click and as "spliced clips" to a listener.
+    A ~40ms equal-power fade removes the step without audibly shortening
+    anything.
+    """
+    import torch
+    if not parts:
+        return None
+    if len(parts) == 1:
+        return parts[0]
+    n = max(1, int(sr * ms / 1000.0))
+    out = parts[0]
+    for nxt in parts[1:]:
+        k = min(n, out.shape[-1], nxt.shape[-1])
+        if k < 8:                      # too short to fade; butt-join
+            out = torch.cat([out, nxt], dim=-1)
+            continue
+        t = torch.linspace(0, 1, k, dtype=out.dtype, device=out.device)
+        fade_out = torch.cos(t * 3.14159265 / 2)   # equal power
+        fade_in = torch.sin(t * 3.14159265 / 2)
+        head, tail = out[..., :-k], out[..., -k:]
+        seam = tail * fade_out + nxt[..., :k] * fade_in
+        out = torch.cat([head, seam, nxt[..., k:]], dim=-1)
+    return out
+
+
 def _parse_script(text):
     """JoyEcho script -> list of shot prompts. JSON {"prompts": [...]} or
     plain text with --- separators. Malformed JSON fails LOUD."""
@@ -375,6 +406,13 @@ class H3MultishotSampler:
                              "max": 0xffffffffffffffff,
                              "control_after_generate": True}),
             "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+            "seed_per_shot": ("BOOLEAN", {
+                "default": True, "label_on": "vary per shot",
+                "label_off": "same seed every shot",
+                "tooltip": "Leave ON. Measured: varying the seed per shot holds the "
+                           "face across the chain; using one seed for every shot "
+                           "made BOTH the face and the voice drift. Identity "
+                           "lives in the conditioning, not the seed."}),
         },
         "optional": {
             "start_image": ("IMAGE", {
@@ -390,7 +428,8 @@ class H3MultishotSampler:
     CATEGORY = "sampling/minimax"
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
-            width, height, frames_per_shot, seed, steps, start_image=None):
+            width, height, frames_per_shot, seed, steps,
+            seed_per_shot=False, start_image=None):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
@@ -463,7 +502,8 @@ class H3MultishotSampler:
                 print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
             # ----------------------------------------------------------------
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
-            noise = ncs.RandomNoise().get_noise(seed + si)[0]
+            shot_seed = (seed + si) if seed_per_shot else seed
+            noise = ncs.RandomNoise().get_noise(shot_seed)[0]
             out, _denoised = ncs.SamplerCustomAdvanced().sample(
                 noise, guider, sampler, sigmas, latent)
 
@@ -487,7 +527,7 @@ class H3MultishotSampler:
             audio_parts.append(wav.cpu())
 
         master = torch.cat(frames_parts, dim=0)
-        waveform = torch.cat(audio_parts, dim=-1)
+        waveform = _xfade_audio(audio_parts, sr)
         print(f"[H3Multishot] done: {n} shots, {master.shape[0]} frames "
               f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
         return (master, {"waveform": waveform, "sample_rate": sr}, n)
@@ -532,6 +572,13 @@ class H3MultishotMemorySampler:
                 "tooltip": "Snaps to H3's 17k+5 grid. 243 = ~10.1s @24fps."}),
             "seed": ("INT", {"default": 0, "min": 0, "max": 0xffffffffffffffff}),
             "steps": ("INT", {"default": 20, "min": 1, "max": 50}),
+            "seed_per_shot": ("BOOLEAN", {
+                "default": True, "label_on": "vary per shot",
+                "label_off": "same seed every shot",
+                "tooltip": "Leave ON. Measured: varying the seed per shot holds the "
+                           "face across the chain; using one seed for every shot "
+                           "made BOTH the face and the voice drift. Identity "
+                           "lives in the conditioning, not the seed."}),
             "memory_frames": ("INT", {"default": 2, "min": 0, "max": 6,
                 "tooltip": "Recent shot-end frames the encoder sees. 0 = stock."}),
             "anchor_frames": ("INT", {"default": 1, "min": 0, "max": 2,
@@ -551,7 +598,7 @@ class H3MultishotMemorySampler:
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count, width,
             height, frames_per_shot, seed, steps, memory_frames, anchor_frames,
-            start_image=None):
+            seed_per_shot=False, start_image=None):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
@@ -624,7 +671,8 @@ class H3MultishotMemorySampler:
                 pass
 
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
-            noise = ncs.RandomNoise().get_noise(seed + si)[0]
+            shot_seed = (seed + si) if seed_per_shot else seed
+            noise = ncs.RandomNoise().get_noise(shot_seed)[0]
             out, _denoised = ncs.SamplerCustomAdvanced().sample(
                 noise, guider, sampler, sigmas, latent)
 
@@ -655,7 +703,7 @@ class H3MultishotMemorySampler:
             audio_parts.append(wav.cpu())
 
         master = torch.cat(frames_parts, dim=0)
-        waveform = torch.cat(audio_parts, dim=-1)
+        waveform = _xfade_audio(audio_parts, sr)
         print("[H3Memory] done: %d shots, %d frames (~%.1fs)." % (
             n, master.shape[0], master.shape[0] / 24.0), flush=True)
         return (master, {"waveform": waveform, "sample_rate": sr}, n)

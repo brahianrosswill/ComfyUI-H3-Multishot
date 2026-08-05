@@ -4,10 +4,25 @@ Multishot video+audio generation for **MiniMax-H3** in ComfyUI: one script,
 N chained shots, one seam-clean master. Plus a dual-format model loader
 (safetensors + GGUF) and the GGUF architecture patch H3 needs.
 
-**v1.1** - image-to-video start frame, and a VRAM fix that cuts render time
-roughly 4x on 32GB cards. See [Changelog](#changelog).
+**v1.2** - keyframes at **any** position (not just first/last), hard-mode
+reference-to-video, and two controls ComfyUI reads but no stock node sets.
+See [Changelog](#changelog).
 
 ## Nodes
+
+- **H3 Keyframes (any position)** - anchor images anywhere in the clip, not
+  just the first and last frame. Stock ComfyUI raises `only first/last keyframe
+  anchors are supported`; that is a positional-maths limit, not a model limit
+  (see the changelog). Up to 6 anchors, positioned as fractions (`0, 0.5, 1`)
+  or absolute frame indices.
+- **H3 Condition Strength** - how strongly keyframe/reference conditioning is
+  trusted. Exposes `minimax_visual_cond_noise_aug` and
+  `minimax_audio_cond_noise_aug`, which ComfyUI core reads but no stock node
+  writes, so they were pinned at their defaults.
+- **H3 Reference Audio (stereo guard)** - forces a reference clip to stereo
+  32 kHz. A **mono** reference crashes the sampler with an unhelpful shape
+  mismatch, because the layout reserves two channels and nothing in stock
+  converts them.
 
 - **H3 Multishot Sampler (one node)** - the whole pipeline: paste a script
   (one prompt per shot, `---` between shots; JSON `{"prompts": [...]}` also
@@ -75,8 +90,8 @@ Full-precision text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.c
   the same graph does T2V and I2V: flip the toggle on to use your frame.
 - `H3_Multishot_MEMORY.json` - long-form mode: the memory sampler with an
   identity anchor, for 2-5 minute multi-shot pieces.
-- `H3_Multishot_3chain_expert.json` - the same pipeline exploded into three
-  visible shot chains for tinkering (fixed 3 shots, per-stage access).
+- `H3_Keyframes.json` - **keyframes anywhere**, single pass. One generation,
+  so the audio is one continuous stream with no seams.
 
 ## Sample
 
@@ -97,6 +112,57 @@ held across both seams. This video was made BY the workflow it demonstrates.
   deeper multi-frame memory for long-form chains, in a hard-mode sampler.
 
 ## Changelog
+
+### v1.2
+
+- **Keyframes at any position.** Stock ComfyUI pins H3 keyframes to frame 0 and
+  frame N-1 and raises `only first/last keyframe anchors are supported` for
+  anything else. Both stock cases are actually the same expression, because
+  `sum(_video_t_spans(latent_t)) == FRAME_RESCALE * frame_count`:
+
+  ```
+  cond_t = text_len + FRAME_RESCALE * pixel_index
+  ```
+
+  which is defined for every frame, not just the two endpoints.
+
+  Measured on an RTX 5090, 243 frames, one anchor at pixel frame 121: the
+  rendered frame most resembling the anchor image was frame **122** - the
+  requested position, off by one - reached by continuous motion with no cut
+  (peak frame-to-frame change 2.3x median), audio unbroken through it.
+
+  The patch is applied **in memory**; it does not edit any ComfyUI file. It
+  self-tests against the stock formula before committing and rolls itself back
+  if first/last positions do not reproduce exactly, so a future ComfyUI change
+  degrades to "interior anchors unavailable" rather than to broken renders.
+
+  **Move vs cut.** Anchor images with a plausible camera path between them
+  (same place, different angle) make H3 interpolate. Images with no possible
+  path (a kitchen and a diner) make it **cut**, then hold - stock first/last
+  does exactly the same with such a pair, so that is the model being sensible,
+  not a defect. The cut case has its own use: a timed shot change inside ONE
+  generation, which keeps the audio continuous across it.
+
+- **Reference-to-video groundwork.** The stereo guard and strength control
+  below are what reference workflows need. The hard-mode graph itself is
+  built but has not been rendered yet, so it is not in this release.
+
+  **References and keyframes cannot coexist.** This is core behaviour, not a
+  choice here: `model_base.py` *assigns* `cond_video_latents` for refs,
+  discarding keyframe latents while the keyframe layout rows survive, and the
+  packed sequence then desyncs into a shape-mismatch crash. Pick one per shot.
+
+  Reference tags are **1-based** in the prompt (`<Picture 1>`) while the input
+  slots are **0-based** (`ref_image_0`). A reference video *with* a soundtrack
+  also consumes an `<Audio j>` ordinal before your standalone clips.
+
+- **H3 Reference Audio (stereo guard).** Mono reference audio produced half the
+  rows the layout reserved and died deep inside the model. Now handled.
+
+- **H3 Condition Strength.** `minimax_visual_cond_noise_aug` /
+  `minimax_audio_cond_noise_aug` are read by core and written by nothing, so
+  they sat at 0.999 / 1.0 forever. They blend noise into conditioning latents
+  and set the timestep the condition rows occupy - an anchor-strength dial.
 
 ### v1.1
 - **Image-to-video.** New optional `start_image` input on the Multishot
@@ -142,3 +208,9 @@ contains several hundred of mine), tips keep the 5090 warm:
 * [Buy me a coffee on Ko-fi](https://ko-fi.com/joeygambino)
 * [Sponsor on GitHub](https://github.com/sponsors/jlucasmcrell)
 * [Liberapay](https://liberapay.com/joeygambino) (recurring)
+
+## On Civitai
+
+- [MiniMax-H3 Multishot (workflows)](https://civitai.com/models/2833322)
+- [MiniMax-H3 GGUF - the DiT](https://civitai.com/models/2833352)
+- [MiniMax-H3 Text Encoder GGUF](https://civitai.com/models/2834385)
