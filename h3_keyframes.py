@@ -87,19 +87,61 @@ def _parse_positions(text, frame_count):
 
         return max(0, min(frame_count - 1, idx))
 
+    # --- compatibility with the pre-percentage syntax -----------------------
+    # Before percentages, a bare value <= 1.0 meant a FRACTION of the clip, so
+    # "0, 0.5, 1" was start/middle/end. Under the new rules that reads as frame
+    # indices 0, 0 and 1 -- which then trips the duplicate-anchor guard, so
+    # every saved workflow using fractions would fail with an error naming the
+    # wrong problem. The shipped H3_Keyframes.json was one of them.
+    #
+    # A bare non-integer <= 1.0 is unambiguous: nobody means "frame index 0.5".
+    # So when a plain list (no % and no ranges) contains one, read the whole
+    # string the old way and say so. Anything else takes the new meaning.
+    raw = text.replace(";", ",")
+    toks = [t.strip() for t in raw.split(",") if t.strip()]
+    if toks and "%" not in raw and "-" not in raw:
+        vals = []
+        for t in toks:
+            try:
+                vals.append(float(t))
+            except ValueError:
+                vals = None
+                break
+        if vals and any(v != int(v) and v <= 1.0 for v in vals):
+            print("[H3Keyframes] positions %r has no '%%' and contains a "
+                  "fraction, so it is being read as the OLD fraction syntax "
+                  "(0-1 = start-end). Switch to percentages -- '%s' -- as "
+                  "bare numbers now mean absolute frame indices."
+                  % (text, ", ".join(f"{v*100:g}%" for v in vals)), flush=True)
+            return [max(0, min(frame_count - 1, int(round(v * (frame_count - 1)))))
+                    for v in vals]
+        if vals and all(v == int(v) for v in vals) and max(vals) <= 1:
+            print("[H3Keyframes] positions %r is now read as ABSOLUTE frame "
+                  "indices, not fractions. If you meant start/end, write "
+                  "'0%%, 100%%'." % text, flush=True)
+    # ------------------------------------------------------------------------
+
     out = []
 
-    #Parse each entry, knowing it might be an inclusive range, 
+    #Parse each entry, knowing it might be an inclusive range,
     #in which case, expand that range into a simple list.
-    for tok in text.replace(";", ",").split(","):
+    for tok in raw.split(","):
         tok = tok.strip()
         if not tok:
             continue
 
+        # A leading '-' is a negative number, not a range separator. Splitting
+        # first turned "-3" into ('', '3') and reported "'' is not a number",
+        # which sends people looking for a typo they did not make.
+        if tok.startswith("-"):
+            raise ValueError(f"position {tok} is negative")
+
         if "-" in tok:
             parts = tok.split("-")
             if len(parts) != 2:
-                raise ValueError(f"invalid range '{tok}'")
+                raise ValueError(
+                    f"invalid range '{tok}': a range is two values, "
+                    f"like '2-5' or '20%-50%'")
 
             left, right = (p.strip() for p in parts)
 
