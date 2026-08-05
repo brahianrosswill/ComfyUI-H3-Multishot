@@ -64,7 +64,13 @@ class H3Keyframes:
     @classmethod
     def INPUT_TYPES(cls):
         opt = {f"image_{i}": ("IMAGE",) for i in range(1, MAX_SLOTS + 1)}
-        opt["images_batch"] = ("IMAGE", )
+        opt["images_batch"] = ("IMAGE", {
+            "tooltip": "A BATCH of anchors, for when six slots is not enough - "
+                       "e.g. several frames at each end to pin complex motion, "
+                       "or a set of frames kept from a source video. Every frame "
+                       "is one anchor, in order, and they come AFTER any "
+                       "individually connected image_N. Give one entry in "
+                       "`positions` per anchor across both."})
         return {
             "required": {
                 "clip": ("CLIP",),
@@ -108,24 +114,35 @@ class H3Keyframes:
 
         latent, frame_count = mmh3._empty_av_latent(width, height, length)
 
-        images_batch = kwargs.get(f"images_batch")
-        if images_batch is None:
-            imgs = [kwargs.get(f"image_{i}") for i in range(1, MAX_SLOTS + 1)]
-        else:
-            imgs = list(torch.chunk(images_batch, chunks=images_batch.shape[0], dim=0))
-
+        imgs = [kwargs.get(f"image_{i}") for i in range(1, MAX_SLOTS + 1)]
         imgs = [im for im in imgs if im is not None]
+
+        # A batched IMAGE is [B, H, W, C], so every frame in it is one more
+        # anchor. Arrived in PR #2 as an either/or input -- a connected batch
+        # replaced the individual slots -- which silently dropped image_1 for
+        # anyone who wired both. Appending instead is a superset: with the slots
+        # empty the behaviour is identical, and mixing them now works.
+        images_batch = kwargs.get("images_batch")
+        n_batch = 0
+        if images_batch is not None and images_batch.shape[0] > 0:
+            n_batch = int(images_batch.shape[0])
+            imgs += list(torch.chunk(images_batch, chunks=n_batch, dim=0))
+
         idxs = _parse_positions(positions, frame_count)
 
         if not imgs:
             raise ValueError(
-                "H3 Keyframes: connect a non-empty image batch (images_batch) or at least one image (image_1..image_6). "
-                "For pure text-to-video use the stock t2va node instead.")
+                "H3 Keyframes: connect at least one image -- an image_N slot or "
+                "a non-empty images_batch. For pure text-to-video use the stock "
+                "t2va node instead.")
         if len(idxs) != len(imgs):
+            src = (f"{len(imgs) - n_batch} slot(s) + {n_batch} from images_batch"
+                   if n_batch else f"{len(imgs)} image(s)")
             raise ValueError(
-                f"H3 Keyframes: {len(imgs)} image(s) connected but "
-                f"{len(idxs)} position(s) given ('{positions}'). "
-                f"Give exactly one position per connected image, in order.")
+                f"H3 Keyframes: {src} connected but {len(idxs)} position(s) "
+                f"given ('{positions}'). Give exactly one position per anchor, "
+                f"in order -- the image_N slots first, then every frame of the "
+                f"batch.")
 
         # ascending, and no two anchors on the same frame
         order = sorted(range(len(idxs)), key=lambda i: idxs[i])
