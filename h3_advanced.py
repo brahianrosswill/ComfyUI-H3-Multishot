@@ -133,11 +133,97 @@ class H3ReferenceAudio:
         return ({"waveform": wav.contiguous(), "sample_rate": sr},)
 
 
+class H3FreeTextEncoder:
+    """Evict the text encoder before the DiT loads. Conditioning passes through.
+
+    The samplers in this pack do this internally, but the STOCK H3 nodes do not
+    -- there is no free_memory / text_encoder_offload call anywhere in
+    comfy_extras/nodes_minimax_h3.py. So any graph built on the stock
+    reference-to-video or image-to-video nodes keeps the ~16.5GB Qwen3-VL
+    encoder resident while the ~25GB DiT loads, which on a 32GB card means the
+    DiT loads PARTIALLY and streams the remainder from system RAM on every
+    sampling step.
+
+    Drop this between the conditioning node and the guider. Conditioning is
+    fully computed by then, so the encoder weights are safe to release, and the
+    guider/sampler pull the DiT in immediately afterwards -- which is exactly
+    the window that matters.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"conditioning": ("CONDITIONING",),
+                             "clip": ("CLIP",)}}
+
+    RETURN_TYPES = ("CONDITIONING",)
+    FUNCTION = "free"
+    CATEGORY = "conditioning/video_models"
+    DESCRIPTION = ("Free the text encoder from VRAM before sampling. Use with "
+                   "the STOCK MiniMax H3 nodes, which never do this. "
+                   "Conditioning passes through untouched.")
+
+    def free(self, conditioning, clip):
+        """Unload the encoder outright. Conditioning is already computed."""
+        import comfy.model_management as mm
+
+        dev = mm.get_torch_device()
+        before = mm.get_free_memory(dev) / (1024 ** 3)
+
+        # Do NOT use free_memory(target): it is a request for a free-memory
+        # TARGET, and get_free_memory already counts evictable weights as free,
+        # so the target is met immediately and nothing is unloaded. Unload the
+        # model objects themselves.
+        n = 0
+        try:
+            loaded = list(getattr(mm, "current_loaded_models", []))
+            want = None
+            try:
+                want = clip.patcher
+            except Exception:
+                want = None
+            for lm in loaded:
+                mp = getattr(lm, "model", None)
+                if want is not None and mp is not want:
+                    continue
+                try:
+                    lm.model_unload()
+                    if lm in mm.current_loaded_models:
+                        mm.current_loaded_models.remove(lm)
+                    n += 1
+                except Exception:
+                    pass
+        except Exception as e:
+            print(f"[H3FreeTE] targeted unload failed: {e}", flush=True)
+
+        if n == 0:
+            # Could not identify the encoder among the loaded models -- fall
+            # back to unloading everything. Safe here: conditioning is done, and
+            # the VAE reloads on demand after sampling.
+            try:
+                mm.unload_all_models()
+                n = -1
+            except Exception as e:
+                print(f"[H3FreeTE] unload_all_models failed: {e}", flush=True)
+
+        try:
+            mm.soft_empty_cache()
+        except Exception:
+            pass
+
+        after = mm.get_free_memory(dev) / (1024 ** 3)
+        how = "all models" if n == -1 else f"{n} model(s)"
+        print(f"[H3FreeTE] unloaded {how}; {before:.1f} -> {after:.1f} GB free",
+              flush=True)
+        return (conditioning,)
+
+
 NODE_CLASS_MAPPINGS = {
     "H3ConditionStrength": H3ConditionStrength,
     "H3ReferenceAudio": H3ReferenceAudio,
+    "H3FreeTextEncoder": H3FreeTextEncoder,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ConditionStrength": "H3 Condition Strength",
     "H3ReferenceAudio": "H3 Reference Audio (stereo guard)",
+    "H3FreeTextEncoder": "H3 Free Text Encoder (VRAM)",
 }

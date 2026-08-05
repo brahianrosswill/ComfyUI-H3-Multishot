@@ -603,6 +603,7 @@ class H3MultishotMemorySampler:
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
         from comfy_extras import nodes_minimax_h3 as mmh3
+        from comfy_extras.nodes_audio import vae_decode_audio
         import comfy.model_management as _mm
 
         shots = _parse_script(script)
