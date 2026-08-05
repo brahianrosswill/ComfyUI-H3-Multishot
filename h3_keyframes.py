@@ -64,6 +64,7 @@ class H3Keyframes:
     @classmethod
     def INPUT_TYPES(cls):
         opt = {f"image_{i}": ("IMAGE",) for i in range(1, MAX_SLOTS + 1)}
+        opt["images_batch"] = ("IMAGE", )
         return {
             "required": {
                 "clip": ("CLIP",),
@@ -107,13 +108,18 @@ class H3Keyframes:
 
         latent, frame_count = mmh3._empty_av_latent(width, height, length)
 
-        imgs = [kwargs.get(f"image_{i}") for i in range(1, MAX_SLOTS + 1)]
+        images_batch = kwargs.get(f"images_batch")
+        if images_batch is None:
+            imgs = [kwargs.get(f"image_{i}") for i in range(1, MAX_SLOTS + 1)]
+        else:
+            imgs = list(torch.chunk(images_batch, chunks=images_batch.shape[0], dim=0))
+
         imgs = [im for im in imgs if im is not None]
         idxs = _parse_positions(positions, frame_count)
 
         if not imgs:
             raise ValueError(
-                "H3 Keyframes: connect at least one image (image_1..image_6). "
+                "H3 Keyframes: connect a non-empty image batch (images_batch) or at least one image (image_1..image_6). "
                 "For pure text-to-video use the stock t2va node instead.")
         if len(idxs) != len(imgs):
             raise ValueError(
