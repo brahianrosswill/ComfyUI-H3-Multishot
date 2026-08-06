@@ -4,8 +4,8 @@ Multishot video+audio generation for **MiniMax-H3** in ComfyUI: one script,
 N chained shots, one seam-clean master. Plus a dual-format model loader
 (safetensors + GGUF) and the GGUF architecture patch H3 needs.
 
-**v1.3** - keyframe positions as percentages and ranges, an unbounded image
-batch, and two controls ComfyUI reads but no stock node sets.
+**v1.4** - sampler and scheduler exposed on both multishot samplers, and the
+bundled workflows relabelled so every node states its job.
 See [Changelog](#changelog).
 
 ## Nodes
@@ -114,6 +114,24 @@ held across both seams. This video was made BY the workflow it demonstrates.
   deeper multi-frame memory for long-form chains, in a hard-mode sampler.
 
 ## Changelog
+
+### v1.4
+
+- **`sampler_name` and `scheduler` are widgets on both multishot samplers.**
+  They were hardcoded to `res_multistep` / `simple` internally; those are now
+  the defaults, so an existing workflow renders exactly what it rendered
+  before. The option lists come from `comfy.samplers.KSampler` at call time
+  (44 samplers, 9 schedulers on current ComfyUI) rather than a copy that can
+  go stale.
+
+  The new widgets sit at the END of the optional inputs on purpose: ComfyUI
+  serialises widget values positionally, so inserting them earlier would
+  silently re-map the saved settings of every existing workflow.
+
+- **Bundled workflows relabelled.** Every node in the three graphs now carries
+  a descriptive title (the two bare `VAELoader`s are "Video VAE" / "Audio VAE",
+  the reference slots state their `<Picture n>` binding, and the long-form
+  graph's read-me note no longer sits on top of the model loaders).
 
 ### v1.3
 
