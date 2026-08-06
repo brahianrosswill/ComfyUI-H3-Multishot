@@ -207,32 +207,13 @@ class H3ModelLoaderAny:
                         gguf.append(os.path.relpath(os.path.join(root, f), d))
         names = sorted(set(files) | set(gguf))
         return {"required": {"model_name": (names, {
-            "tooltip": "safetensors or GGUF - loader routes automatically."})},
-            "optional": {"activation_reserve_gb": ("FLOAT", {
-                "default": 0.0, "min": 0.0, "max": 24.0, "step": 0.5,
-                "tooltip": "0 = ComfyUI's own inference-memory estimate (VERY "
-                "conservative for H3 - at 736x1344x362f it reserves ~20 GB and "
-                "leaves the DiT nothing, streaming every weight from RAM). Set "
-                "a measured value (start ~8-10 for hi-res, ~5-6 for 544x960) to "
-                "reclaim the difference for resident weights. Too low = OOM "
-                "mid-sample: raise in 1-2 GB steps."})}}
+            "tooltip": "safetensors or GGUF - loader routes automatically."})}}
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
     CATEGORY = "loaders/minimax"
 
-    def load(self, model_name, activation_reserve_gb=0.0):
-        out = self._load_inner(model_name)
-        if activation_reserve_gb and activation_reserve_gb > 0:
-            patcher = out[0]
-            _cap = int(activation_reserve_gb * (1024 ** 3))
-            patcher.memory_required = lambda input_shape, _c=_cap: _c
-            print(f"[H3ModelLoader] activation reserve OVERRIDDEN to "
-                  f"{activation_reserve_gb:.1f} GB (comfy estimate bypassed)",
-                  flush=True)
-        return out
-
-    def _load_inner(self, model_name):
+    def load(self, model_name):
         import folder_paths
         if model_name.lower().endswith(".gguf"):
             # resolve the live UnetLoaderGGUF from the global registry -
