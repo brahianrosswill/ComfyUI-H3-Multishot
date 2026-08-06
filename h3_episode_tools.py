@@ -87,13 +87,30 @@ class H3LastFrame:
 
 
 class H3ConcatAV:
-    """Concatenate two video+audio segments into one continuous take."""
+    """Concatenate two video+audio segments into one continuous take.
+
+    match_b (default on): measure the seam and match segment B's texture to
+    segment A. The two-stage chain renders A on ref2va (soft - reference
+    conditioning pulls the image toward the refs' texture) and B on fl2va
+    (crisper, higher micro-contrast); measured on a real take the seam was a
+    +119..174% Laplacian sharpness step plus +5% luma - a visible focus
+    snap. Steps parity cannot equalize two checkpoints, so B gets an
+    auto-tuned gaussian (sigma searched until B's Laplacian lands on A's)
+    and a luma affine, in float tensors before any encode. A's softer look
+    IS the intended consumer-camcorder texture, so matching downward is the
+    correct direction. Skips itself when the seam is already within 15%.
+    """
 
     @classmethod
     def INPUT_TYPES(cls):
         return {"required": {
             "images_a": ("IMAGE",), "audio_a": ("AUDIO",),
             "images_b": ("IMAGE",), "audio_b": ("AUDIO",),
+        }, "optional": {
+            "match_b": (["match_to_a", "off"], {"default": "match_to_a",
+                "tooltip": "Match segment B's sharpness/tone to segment A "
+                "at the seam (the two stages render on different "
+                "checkpoints with different texture character)."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO")
@@ -101,7 +118,74 @@ class H3ConcatAV:
     FUNCTION = "concat"
     CATEGORY = "video/minimax"
 
-    def concat(self, images_a, audio_a, images_b, audio_b):
+    @staticmethod
+    def _gray(x):
+        return (0.299 * x[..., 0] + 0.587 * x[..., 1] + 0.114 * x[..., 2])
+
+    @classmethod
+    def _lap_var(cls, x):
+        import torch
+        g = cls._gray(x).unsqueeze(1)
+        k = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]],
+                         dtype=g.dtype, device=g.device).view(1, 1, 3, 3)
+        return float(torch.nn.functional.conv2d(g, k, padding=1).var())
+
+    @staticmethod
+    def _gauss(x, sigma):
+        """Separable gaussian on [T,H,W,C], returns same shape."""
+        import math
+        import torch
+        r = max(1, int(math.ceil(3 * sigma)))
+        t = torch.arange(-r, r + 1, dtype=x.dtype, device=x.device)
+        k = torch.exp(-(t ** 2) / (2 * sigma * sigma))
+        k = (k / k.sum()).view(1, 1, 1, -1)
+        v = x.permute(0, 3, 1, 2)                       # [T,C,H,W]
+        c = v.shape[1]
+        kh = k.expand(c, 1, 1, k.shape[-1])
+        v = torch.nn.functional.conv2d(v, kh, padding=(0, r), groups=c)
+        kv = k.view(1, 1, -1, 1).expand(c, 1, k.shape[-1], 1)
+        v = torch.nn.functional.conv2d(v, kv, padding=(r, 0), groups=c)
+        return v.permute(0, 2, 3, 1)
+
+    def _match(self, images_a, images_b):
+        import torch
+        dev = "cuda" if torch.cuda.is_available() else "cpu"
+        na = images_a[-min(24, images_a.shape[0]):].to(dev)
+        step = max(1, images_b.shape[0] // 24)
+        nb = images_b[::step][:24].to(dev)
+        lap_a, lap_b = self._lap_var(na), self._lap_var(nb)
+        ga, gb = self._gray(na), self._gray(nb)
+        ma, sa = float(ga.mean()), float(ga.std())
+        mb, sb = float(gb.mean()), float(gb.std())
+        sigma = 0.0
+        if lap_b > lap_a * 1.15:
+            ref = nb[len(nb) // 2:len(nb) // 2 + 1]
+            best = (float("inf"), 0.0)
+            for s in (0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.6):
+                d = abs(self._lap_var(self._gauss(ref, s)) - lap_a)
+                if d < best[0]:
+                    best = (d, s)
+            sigma = best[1]
+        gain = max(0.85, min(1.15, sa / max(sb, 1e-6)))
+        off = ma - mb * gain
+        if sigma == 0.0 and abs(off) < 0.006 and abs(gain - 1) < 0.02:
+            print(f"[H3ConcatAV] seam already matched (sharp "
+                  f"{lap_b / max(lap_a, 1e-9):+.0%} vs A) - no-op", flush=True)
+            return images_b
+        out = torch.empty_like(images_b)
+        for i in range(0, images_b.shape[0], 32):
+            ch = images_b[i:i + 32].to(dev)
+            if sigma > 0:
+                ch = self._gauss(ch, sigma)
+            ch = (ch * gain + off).clamp(0, 1)
+            out[i:i + 32] = ch.to(images_b.device)
+        print(f"[H3ConcatAV] matched B to A: sigma {sigma:.2f}, gain "
+              f"{gain:.3f}, offset {off:+.4f} (sharp was "
+              f"{lap_b / max(lap_a, 1e-9):+.0%} vs A)", flush=True)
+        return out
+
+    def concat(self, images_a, audio_a, images_b, audio_b,
+               match_b="match_to_a"):
         import torch
         if tuple(images_a.shape[1:3]) != tuple(images_b.shape[1:3]):
             raise ValueError(
@@ -109,6 +193,8 @@ class H3ConcatAV:
                 f"{tuple(images_a.shape[1:3])} vs B "
                 f"{tuple(images_b.shape[1:3])} - both stages must render at "
                 "the same width/height.")
+        if match_b == "match_to_a":
+            images_b = self._match(images_a, images_b)
         images = torch.cat((images_a, images_b), dim=0)
         wa, wb = audio_a["waveform"], audio_b["waveform"]
         sa = int(audio_a["sample_rate"])
