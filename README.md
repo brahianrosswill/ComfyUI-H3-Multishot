@@ -4,8 +4,11 @@ Multishot video+audio generation for **MiniMax-H3** in ComfyUI: one script,
 N chained shots, one seam-clean master. Plus a dual-format model loader
 (safetensors + GGUF) and the GGUF architecture patch H3 needs.
 
-**v1.4** - sampler and scheduler exposed on both multishot samplers, and the
-bundled workflows relabelled so every node states its job.
+**v1.5** - chained Hard Mode: one script where shot 1 renders from
+references (ref2va) and later shots chain I2V from its last frame, joined
+in-graph into one master with audio. Plus a 4-slot MODEL-only LoRA stack,
+an `activation_reserve_gb` override on the loader for 24 GB cards, and an
+experimental fix that lets references and keyframes coexist.
 See [Changelog](#changelog).
 
 ## Nodes
@@ -114,6 +117,32 @@ held across both seams. This video was made BY the workflow it demonstrates.
   deeper multi-frame memory for long-form chains, in a hard-mode sampler.
 
 ## Changelog
+
+### v1.5
+
+- **Chained Hard Mode** (`workflows/H3_HardMode_Chained.json` + the Hard Mode
+  release page): `H3EpisodeSplit` splits a `---` script into shot 1 (with your
+  `<Picture N>` bindings) and the rest; shot 1 renders ref2va, `H3LastFrame`
+  hands its final frame to the multishot sampler as `start_image`, and
+  `H3ConcatAV` joins both segments into one master with audio.
+- **`H3LoraStack`** - four MODEL-only LoRA slots (no CLIP input; H3's encoder
+  is not a CLIP), `None`-inert, for e.g. 4-step turbo distills.
+- **`activation_reserve_gb`** on `H3ModelLoaderAny` - override ComfyUI's very
+  conservative inference-memory estimate (at 736x1344x362f it reserves ~20 GB
+  and streams every weight from RAM on a 24 GB card). Set a measured value
+  (~6 GB) to reclaim the difference for resident weights. Survives LoRA
+  stacks cloning the patcher.
+- **Experimental: references + keyframes can coexist** - core ComfyUI drops
+  keyframe latents when references are present (an overwrite where an append
+  belongs), which is the real cause of the long-standing "no refs + start
+  frame" limitation. The pack now merges them in the correct packed order,
+  and `H3KeyframeInject` adds a start-frame keyframe to ref2va conditioning.
+  Measured: the ref2va checkpoint follows the keyframe's subjects and staging
+  but holds it match-cut tight, not pixel tight - treat chains built this way
+  as cuts, not continuous takes.
+- Auto-reference helpers (`H3AutoRefs`, `H3RefBatch`): pick per-character
+  reference sets from folders by scanning the prompt's prose (dialogue
+  stripped), and generate the `<Picture N>` binding lines automatically.
 
 ### v1.4
 
