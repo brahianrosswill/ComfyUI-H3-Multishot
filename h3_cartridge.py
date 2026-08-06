@@ -27,7 +27,6 @@ import io
 import json
 import os
 import shutil
-import subprocess
 import zipfile
 
 SPEC_REQUIRED = ("riftcast", "name", "speaker_tag", "voice", "refs", "dna")
@@ -187,17 +186,33 @@ class H3CartridgeLoader:
 
     @staticmethod
     def _load_audio(path, cache_dir):
-        import torchaudio
-        if not path.lower().endswith(".wav"):
-            wav = os.path.join(cache_dir, os.path.basename(path) + ".wav")
-            if not os.path.isfile(wav):
-                r = subprocess.run(["ffmpeg", "-v", "error", "-y", "-i", path,
-                                    "-vn", "-acodec", "pcm_s16le", wav],
-                                   capture_output=True, text=True)
-                if r.returncode != 0:
-                    raise RiftcastError(f"voice decode failed: {r.stderr[:200]}")
-            path = wav
-        waveform, sr = torchaudio.load(path)
+        """Decode with PyAV, which ComfyUI bundles - no external ffmpeg needed.
+
+        The cartridge voice anchors are .mp4; a subprocess-ffmpeg dependency
+        would silently require ffmpeg on PATH on every rig. av 18 decodes the
+        real anchors (verified on WREN: stereo, 48 kHz). Falls back to
+        torchaudio for plain wav only if av is somehow absent.
+        """
+        import numpy as np
+        import torch
+        try:
+            import av
+            frames = []
+            with av.open(path) as c:
+                stream = next(s for s in c.streams if s.type == "audio")
+                sr = stream.rate
+                for fr in c.decode(stream):
+                    a = fr.to_ndarray()
+                    if a.dtype.kind == "i":
+                        a = a.astype("float32") / float(1 << (8 * a.itemsize - 1))
+                    frames.append(a.astype("float32"))
+            wav = np.concatenate(frames, axis=-1)
+            if wav.ndim == 1:
+                wav = wav[None, :]
+            waveform = torch.from_numpy(wav)
+        except ImportError:
+            import torchaudio
+            waveform, sr = torchaudio.load(path)
         return {"waveform": waveform.unsqueeze(0), "sample_rate": sr}
 
     def load(self, cartridge, max_refs, manual_path=""):
