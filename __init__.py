@@ -28,3 +28,8 @@ from .h3_episode_tools import (NODE_CLASS_MAPPINGS as _ET_C,
                                NODE_DISPLAY_NAME_MAPPINGS as _ET_D)
 NODE_CLASS_MAPPINGS.update(_ET_C)
 NODE_DISPLAY_NAME_MAPPINGS.update(_ET_D)
+
+from .h3_avbank_probe import (NODE_CLASS_MAPPINGS as _AV_C,
+                              NODE_DISPLAY_NAME_MAPPINGS as _AV_D)
+NODE_CLASS_MAPPINGS.update(_AV_C)
+NODE_DISPLAY_NAME_MAPPINGS.update(_AV_D)
