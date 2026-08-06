@@ -226,7 +226,12 @@ class H3ModelLoaderAny:
         if activation_reserve_gb and activation_reserve_gb > 0:
             patcher = out[0]
             _cap = int(activation_reserve_gb * (1024 ** 3))
-            patcher.memory_required = lambda input_shape, _c=_cap: _c
+            # Must live on the inner BaseModel, not the ModelPatcher: LoRA
+            # stacks and guiders clone() the patcher before sampling and an
+            # instance attribute does not survive the clone, silently
+            # restoring comfy's estimate. Clones share this BaseModel.
+            patcher.model.memory_required = lambda *a, _c=_cap, **k: _c
+            patcher.memory_required = lambda *a, _c=_cap, **k: _c
             print(f"[H3ModelLoader] activation reserve OVERRIDDEN to "
                   f"{activation_reserve_gb:.1f} GB (comfy estimate bypassed)",
                   flush=True)
