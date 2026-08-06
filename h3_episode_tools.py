@@ -284,15 +284,87 @@ class H3AutoRefs:
         return tuple(out + [prompt_out, report])
 
 
+class H3RefBatch:
+    """Adapt JoyEcho_RefPicker's output to MiniMaxH3ReferenceToVideo.
+
+    The RefPicker returns one IMAGE batch (one frame per picked reference)
+    plus a `picked_path` string ("path; path; ..."). H3's reference node
+    wants SEPARATE ref_image_N inputs and <Picture N> identity bindings in
+    the prompt. This node splits the batch into up to 9 slots, dedupes the
+    re-entry duplicates the picker schedules for LTX (meaningless for
+    ref2va - all refs bind at t=0), derives character names from each
+    path's parent folder, and prepends the binding lines to the prompt.
+    """
+
+    MAX_SLOTS = 9
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "prompt": ("STRING", {"forceInput": True}),
+        }, "optional": {
+            "reference_image": ("IMAGE",),
+            "picked_path": ("STRING", {"forceInput": True, "default": ""}),
+        }}
+
+    RETURN_TYPES = tuple(["IMAGE"] * 9 + ["STRING", "STRING"])
+    RETURN_NAMES = tuple([f"ref_{i+1}" for i in range(9)]
+                         + ["prompt_out", "report"])
+    FUNCTION = "adapt"
+    CATEGORY = "video/minimax"
+
+    def adapt(self, prompt, reference_image=None, picked_path=""):
+        import os
+        if reference_image is None or (picked_path or "").startswith("("):
+            print("[H3RefBatch] no references from picker; prompt passes "
+                  "through unchanged.", flush=True)
+            return tuple([None] * self.MAX_SLOTS + [prompt, "(no references)"])
+
+        paths = [p.strip() for p in (picked_path or "").split(";") if p.strip()]
+        frames = [reference_image[i:i+1] for i in range(reference_image.shape[0])]
+        # dedupe the picker's re-entry duplicates (same path repeated)
+        keep, seen = [], set()
+        for i, fr in enumerate(frames):
+            p = paths[i] if i < len(paths) else f"(slot {i})"
+            if p in seen:
+                continue
+            seen.add(p)
+            keep.append((fr, p))
+        keep = keep[:self.MAX_SLOTS]
+
+        binds, lines, per_char, order = [], [], {}, []
+        for idx, (fr, p) in enumerate(keep, start=1):
+            char = os.path.basename(os.path.dirname(p)) or "character"
+            if char not in per_char:
+                per_char[char] = []
+                order.append(char)
+            per_char[char].append(idx)
+            lines.append(f"{char}/{os.path.basename(p)} -> <Picture {idx}>")
+        for char in order:
+            nums = [f"<Picture {i}>" for i in per_char[char]]
+            disp = char.replace("_", " ").replace("-", " ").title()
+            binds.append(f"{', '.join(nums)} "
+                         f"{'is' if len(nums) == 1 else 'are'} "
+                         f"the same person ({disp}).")
+
+        prompt_out = "\n".join(binds) + "\n" + (prompt or "")
+        report = f"{len(keep)} ref(s): " + "; ".join(lines)
+        print(f"[H3RefBatch] {report}", flush=True)
+        out = [fr for fr, _ in keep] + [None] * (self.MAX_SLOTS - len(keep))
+        return tuple(out + [prompt_out, report])
+
+
 NODE_CLASS_MAPPINGS = {
     "H3EpisodeSplit": H3EpisodeSplit,
     "H3LastFrame": H3LastFrame,
     "H3ConcatAV": H3ConcatAV,
     "H3AutoRefs": H3AutoRefs,
+    "H3RefBatch": H3RefBatch,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3EpisodeSplit": "H3 Episode Split (stage A + B)",
     "H3LastFrame": "H3 Last Frame",
     "H3ConcatAV": "H3 Concat A/V",
     "H3AutoRefs": "H3 Auto Refs (folders, by prompt)",
+    "H3RefBatch": "H3 Ref Batch (RefPicker -> ref slots)",
 }
