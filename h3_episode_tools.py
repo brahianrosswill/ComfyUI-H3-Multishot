@@ -342,7 +342,9 @@ class H3RefBatch:
             lines.append(f"{char}/{os.path.basename(p)} -> <Picture {idx}>")
         for char in order:
             nums = [f"<Picture {i}>" for i in per_char[char]]
-            disp = char.replace("_", " ").replace("-", " ").title()
+            # variant folders (zara_preflash, madison-corrupted) are the SAME
+            # person - bind the base name, i.e. the first separator token
+            disp = re.split(r"[-_]", char)[0].title()
             binds.append(f"{', '.join(nums)} "
                          f"{'is' if len(nums) == 1 else 'are'} "
                          f"the same person ({disp}).")
