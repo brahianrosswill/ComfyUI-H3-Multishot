@@ -230,6 +230,23 @@ class H3ModelLoaderAny:
         return (comfy.sd.load_diffusion_model(path),)
 
 
+def _sampler_names():
+    """From core, so the list cannot rot out of step with ComfyUI."""
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SAMPLERS)
+    except Exception:
+        return ["res_multistep", "euler", "dpmpp_2m"]
+
+
+def _scheduler_names():
+    try:
+        import comfy.samplers
+        return list(comfy.samplers.KSampler.SCHEDULERS)
+    except Exception:
+        return ["simple", "normal", "beta"]
+
+
 class H3ClipLoaderAny:
     """One dropdown for text encoders, both formats: .safetensors through
     comfy core CLIPLoader, .gguf through ComfyUI-GGUF's CLIPLoaderGGUF
@@ -430,6 +447,14 @@ class H3MultishotSampler:
                            "image; later shots continue chaining from the "
                            "previous shot's last frame as usual. Leave "
                            "unconnected for pure text-to-video."}),
+            "sampler_name": (_sampler_names(), {
+                "default": "res_multistep",
+                "tooltip": "Sampling algorithm. res_multistep is the default "
+                           "and what every measurement in the docs used."}),
+            "scheduler": (_scheduler_names(), {
+                "default": "simple",
+                "tooltip": "Sigma schedule. simple is the default and what "
+                           "the docs measured."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -439,7 +464,8 @@ class H3MultishotSampler:
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
             width, height, frames_per_shot, seed, steps,
-            seed_per_shot=False, start_image=None):
+            seed_per_shot=False, start_image=None,
+            sampler_name="res_multistep", scheduler="simple"):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
@@ -458,8 +484,8 @@ class H3MultishotSampler:
                   flush=True)
             shots.append(shots[-1])
 
-        sigmas = ncs.BasicScheduler().get_sigmas(model, "simple", steps, 1.0)[0]
-        sampler = ncs.KSamplerSelect().get_sampler("res_multistep")[0]
+        sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps, 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
 
         frames_parts, audio_parts = [], []
         sr = None
@@ -599,6 +625,14 @@ class H3MultishotMemorySampler:
             "start_image": ("IMAGE", {
                 "tooltip": "Optional first frame (I2V). Also becomes the identity "
                            "anchor when anchor_frames > 0."}),
+            "sampler_name": (_sampler_names(), {
+                "default": "res_multistep",
+                "tooltip": "Sampling algorithm. res_multistep is the default "
+                           "and what every measurement in the docs used."}),
+            "scheduler": (_scheduler_names(), {
+                "default": "simple",
+                "tooltip": "Sigma schedule. simple is the default and what "
+                           "the docs measured."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -608,7 +642,8 @@ class H3MultishotMemorySampler:
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count, width,
             height, frames_per_shot, seed, steps, memory_frames, anchor_frames,
-            seed_per_shot=False, start_image=None):
+            seed_per_shot=False, start_image=None,
+            sampler_name="res_multistep", scheduler="simple"):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
@@ -623,8 +658,8 @@ class H3MultishotMemorySampler:
         while len(shots) < n:
             shots.append(shots[-1])
 
-        sigmas = ncs.BasicScheduler().get_sigmas(model, "simple", steps, 1.0)[0]
-        sampler = ncs.KSamplerSelect().get_sampler("res_multistep")[0]
+        sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps, 1.0)[0]
+        sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
 
         frames_parts, audio_parts = [], []
         sr = None
