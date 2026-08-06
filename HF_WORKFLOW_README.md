@@ -13,6 +13,13 @@ tags:
 
 # MiniMax-H3 Multishot Workflow
 
+**v1.4** — `sampler_name` and `scheduler` are now widgets on both multishot
+samplers (defaults `res_multistep` / `simple`, exactly the values previously
+hardcoded, so existing workflows render identically). The bundled workflows are
+relabelled: every node carries a descriptive title. Node pack:
+[ComfyUI-H3-Multishot v1.4](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot).
+
+
 Chain multiple MiniMax-H3 shots into one continuous video **with audio** - in
 one node. Each shot starts from the last frame of the previous one; the
 duplicated seam frame and its 1/24s of audio are trimmed automatically.
