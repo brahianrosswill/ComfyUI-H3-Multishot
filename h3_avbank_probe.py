@@ -101,4 +101,4 @@ class H3KeyframeInject:
 
 NODE_CLASS_MAPPINGS = {"H3KeyframeInject": H3KeyframeInject}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "H3KeyframeInject": "H3 Keyframe Inject (refs + start frame PROBE)"}
+    "H3KeyframeInject": "H3 Keyframe Inject (experimental: refs + start frame)"}
