@@ -689,6 +689,16 @@ class H3MultishotSampler:
                            "image; later shots continue chaining from the "
                            "previous shot's last frame as usual. Leave "
                            "unconnected for pure text-to-video."}),
+            "self_anchor_voice": ("BOOLEAN", {
+                "default": False, "label_on": "anchor to shot 1's voice",
+                "label_off": "off",
+                "tooltip": "AUTOMATIC voice identity: after shot 1 renders, "
+                           "its own audio becomes the reference (<Audio 1>) "
+                           "for every later shot - the voice the model "
+                           "actually performed is pinned, no file needed. "
+                           "Write shot 1 so the character speaks a clean "
+                           "solo line. An external voice_ref, if connected, "
+                           "takes priority. Use with a ref2va checkpoint."}),
             "voice_ref": ("AUDIO", {
                 "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
                            "reference audio (<Audio 1>). Feed a clean solo "
@@ -720,6 +730,7 @@ class H3MultishotSampler:
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
             width, height, frames_per_shot, seed, steps,
             seed_per_shot=False, start_image=None, voice_ref=None,
+            self_anchor_voice=False,
             sampler_name="res_multistep", scheduler="simple"):
         import torch
         import node_helpers
@@ -870,6 +881,21 @@ class H3MultishotSampler:
             wav = aud["waveform"]
 
             prev_last = imgs[-1:].clone()
+            if si == 0 and self_anchor_voice and voice_block is None:
+                # THE self-anchor: shot 1's own rendered voice becomes the
+                # reference for every later shot. The decoded audio is
+                # already at the VAE's rate and stereo, so no guard needed -
+                # just trim (ref rows cost speed every step) and encode.
+                aw = wav[:1] if wav.ndim == 3 else wav.unsqueeze(0)[:1]
+                limit = 15 * sr
+                if aw.shape[-1] > limit:
+                    aw = aw[..., :limit]
+                vz = audio_vae.encode(aw.movedim(1, -1))
+                voice_block = {"kind": "audio", "ref_audio_t": vz.shape[-1],
+                               "audio_latent": vz}
+                print(f"[H3Multishot] self-anchor: shot 1's voice "
+                      f"({aw.shape[-1]/sr:.1f}s) is now <Audio 1> for the "
+                      f"remaining {n - 1} shot(s).", flush=True)
             if si > 0:
                 imgs = imgs[1:]                       # duplicated seam frame
                 trim = int(round(sr / 24.0))          # matching 1/24s audio
