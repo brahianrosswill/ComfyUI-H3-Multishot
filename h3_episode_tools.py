@@ -55,15 +55,19 @@ class H3EpisodeSplit:
         else:
             blocks = [b.strip() for b in _BLOCK_SPLIT.split(text) if b.strip()]
         blocks = [str(b).strip() for b in blocks if str(b).strip()]
-        if len(blocks) < 2:
-            raise ValueError(
-                f"[H3EpisodeSplit] {len(blocks)} block(s) parsed - this "
-                "workflow chains stage B after stage A, so it needs at least "
-                "2. For a single-block scene use the plain Hard Mode "
-                "reference workflow instead.")
         b = (bindings or "").strip()
         block1 = (b + "\n" + blocks[0]) if b else blocks[0]
         rest = json.dumps({"prompts": blocks[1:]}, ensure_ascii=False)
+        if len(blocks) < 2:
+            # Single-block scene: stage A alone is the whole render. Do not
+            # raise - a one-shot scene is a legitimate thing to want, and the
+            # graph supports it as soon as stage B is muted (H3ConcatAV takes
+            # its B inputs as optional and passes A straight through).
+            info = ("1 block -> single-shot render. MUTE the stage B group "
+                    "(sampler + last-frame) with Ctrl-M; H3ConcatAV then "
+                    "passes stage A through unchanged. ~15s total.")
+            print(f"[H3EpisodeSplit] {info}", flush=True)
+            return (block1, rest, info)
         info = (f"{len(blocks)} blocks -> stage A renders block 1, "
                 f"stage B chains {len(blocks) - 1} block(s) "
                 f"(~{len(blocks) * 15.1:.0f}s total at 362f/block)")
@@ -105,8 +109,11 @@ class H3ConcatAV:
     def INPUT_TYPES(cls):
         return {"required": {
             "images_a": ("IMAGE",), "audio_a": ("AUDIO",),
-            "images_b": ("IMAGE",), "audio_b": ("AUDIO",),
         }, "optional": {
+            "images_b": ("IMAGE", {"tooltip":
+                "Stage B. Leave unconnected, or MUTE the stage B group, for a "
+                "single-shot render - stage A then passes through unchanged."}),
+            "audio_b": ("AUDIO",),
             "match_b": (["match_to_a", "off"], {"default": "match_to_a",
                 "tooltip": "Match segment B's sharpness/tone to segment A "
                 "at the seam (the two stages render on different "
@@ -184,9 +191,16 @@ class H3ConcatAV:
               f"{lap_b / max(lap_a, 1e-9):+.0%} vs A)", flush=True)
         return out
 
-    def concat(self, images_a, audio_a, images_b, audio_b,
+    def concat(self, images_a, audio_a, images_b=None, audio_b=None,
                match_b="match_to_a"):
         import torch
+        if images_b is None or audio_b is None:
+            # Single-shot render: stage B is muted, so there is nothing to
+            # join and stage A IS the finished take. Pass it through rather
+            # than failing - a one-block scene is a legitimate thing to want.
+            print("[H3ConcatAV] stage B absent (muted) - passing stage A "
+                  "through unchanged, single-shot render.", flush=True)
+            return (images_a, audio_a)
         if tuple(images_a.shape[1:3]) != tuple(images_b.shape[1:3]):
             raise ValueError(
                 f"[H3ConcatAV] frame sizes differ: A "
