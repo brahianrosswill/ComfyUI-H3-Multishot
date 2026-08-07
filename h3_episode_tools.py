@@ -311,6 +311,7 @@ class H3AutoRefs:
                     scrub = " ".join(str(x) for x in arr)
             except (ValueError, TypeError):
                 pass
+            scrub = re.sub(r"<d>.*?</d>", " ", scrub, flags=re.S)
             scrub = re.sub(r'\\"(?:[^"\\]|\\.)*?\\"', " ", scrub)
             scrub = re.sub(r'"(?:[^"\\]|\\.)*?"', " ", scrub)
             scrub = re.sub(r"says,\s*'(?:[^'])*?'", " ", scrub)
