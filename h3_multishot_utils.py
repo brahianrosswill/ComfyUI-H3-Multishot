@@ -220,6 +220,7 @@ _AUTO_FRACTION = 0.60              # unmeasured shapes: fraction of free VRAM
 _AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
 _auto_cache = None                 # lazy {key: pool_bytes}
 _auto_last = {"key": None, "model": None}   # what the next sampling run is
+_auto_session = {}                 # key -> reserve pinned for this session
 
 
 def _auto_cache_path():
@@ -287,6 +288,15 @@ def _install_auto_reserve(patcher, model_name):
             cells = 0
         key = _auto_key(model_name, cells)
         _auto_last["key"] = key
+        # comfy (and DynamicVRAM) call memory_required repeatedly - per load
+        # AND per sampling step. The answer must be STABLE for a shape:
+        # recomputing "60% of free" as free shrinks is a feedback loop
+        # (reserving memory reduces free, which reduces the next answer).
+        # Pin the first computation per (model, shape) for the session;
+        # a fresh measurement invalidates the pin.
+        pinned = _auto_session.get(key)
+        if pinned is not None:
+            return pinned
         measured = _auto_cache_load().get(key)
         if measured:
             reserve = max(int(measured * _AUTO_MARGIN), _AUTO_FLOOR)
@@ -299,6 +309,7 @@ def _install_auto_reserve(patcher, model_name):
                 free = 24 * 1024**3
             reserve = max(int(free * _AUTO_FRACTION), _AUTO_FLOOR)
             how = f"first run at this shape: {_AUTO_FRACTION:.0%} of free"
+        _auto_session[key] = reserve
         print(f"[H3AutoReserve] shape cells={cells}: reserving "
               f"{reserve/2**30:.1f} GB ({how})", flush=True)
         return reserve
@@ -342,6 +353,7 @@ def _auto_measure_end(before, patcher=None):
         pool = peak - before - loaded
         if pool > 512 * 1024**2:            # ignore no-op runs
             _auto_cache_store(_auto_last["key"], pool)
+            _auto_session.pop(_auto_last["key"], None)   # re-pin from measured
             print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB for "
                   f"this shape (peak {peak/2**30:.1f} - weights "
                   f"{loaded/2**30:.1f}) - next run reserves "
