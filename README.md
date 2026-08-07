@@ -67,12 +67,39 @@ See [Changelog](#changelog).
 
 1. Clone into `custom_nodes/` (or install via ComfyUI-Manager > Install via
    Git URL).
-2. For GGUF models: install [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF),
-   then run `python apply_gguf_arch_patch.py` from this folder (one line,
-   idempotent - teaches it the `minimax_h3` architecture).
+2. For GGUF models, also install
+   [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF). Nothing else to do -
+   as of v1.5.2 this pack teaches it the `minimax_h3` architecture
+   automatically, in memory, every time ComfyUI starts.
 3. Restart ComfyUI, load `workflows/H3_Multishot_AIO.json`.
 
 Requires ComfyUI **v0.30.0+** (native MiniMax H3 support).
+
+### Troubleshooting GGUF loading
+
+**`Unexpected architecture type in GGUF file: 'minimax_h3'`**
+ComfyUI-GGUF checks a GGUF's architecture against a fixed list and rejects the
+file before reading any tensors; upstream's list has no `minimax_h3` entry. The
+quant is fine - the loader simply does not recognise it yet. This pack patches
+that list in memory at startup, so installing the pack is the whole fix. If you
+see this error anyway, the pack is not loaded (check the ComfyUI console for
+`[H3] taught ComfyUI-GGUF the 'minimax_h3' architecture`), or apply the on-disk
+fallback with `python apply_gguf_arch_patch.py` from this folder and restart.
+
+**Text-encoder GGUF fails with a state_dict / vision mismatch**
+Load the H3 text encoder with this pack's **H3 Clip Loader (Any)**, not the
+stock `CLIPLoaderGGUF`. The H3 encoder is a *truncated* Qwen3-VL-32B (50 layers,
+no final norm, no lm_head) whose vision tower ships as a separate
+`-mmproj-*.gguf` sidecar. Stock ComfyUI-GGUF only merges an mmproj when the
+architecture is `qwen2vl`, and Qwen3-VL reports `qwen3vl`, so the sidecar is
+never merged - and its key map is qwen2vl-era anyway (wrong merger keys, no
+deepstack or split-QKV rules). This pack's loader does the truncation, the
+merge, and the vision-tensor renaming. Keep the `-mmproj` file in the same
+folder as the encoder and do not rename either: they are paired by filename.
+
+A full `.safetensors` encoder (fp8, int8, NVFP4-AWQ, ...) needs none of this -
+it is a complete pre-shaped model, which is why those "just work" while the
+GGUF needs the pack's loader.
 
 ## Models
 
@@ -117,6 +144,21 @@ held across both seams. This video was made BY the workflow it demonstrates.
   deeper multi-frame memory for long-form chains, in a hard-mode sampler.
 
 ## Changelog
+
+### v1.5.2
+
+- **GGUF loading now works out of the box.** The pack teaches ComfyUI-GGUF the
+  `minimax_h3` architecture in memory at startup, so the DiT quants load with
+  no manual step and nothing written to disk. This replaces the one-time
+  `apply_gguf_arch_patch.py` step, which is kept only as a fallback. Reported
+  independently by three users as "Unexpected architecture type in GGUF file:
+  'minimax_h3'" and as "all the GGUFs error" - it was never the quants, it was
+  a footnote in the install instructions.
+- Because the patch is in memory, it survives ComfyUI-GGUF updates instead of
+  being reverted by them.
+- README: added a GGUF troubleshooting section covering that error and the
+  text-encoder / `-mmproj` sidecar pairing (use **H3 Clip Loader (Any)**, not
+  the stock `CLIPLoaderGGUF`).
 
 ### v1.5
 

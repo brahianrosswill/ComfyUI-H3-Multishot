@@ -1,3 +1,4 @@
+from . import h3_gguf_arch  # noqa: F401  (teaches ComfyUI-GGUF minimax_h3 on import)
 from .h3_multishot_utils import (NODE_CLASS_MAPPINGS,
                                  NODE_DISPLAY_NAME_MAPPINGS)
 from .h3_keyframes import (NODE_CLASS_MAPPINGS as _KF_C,

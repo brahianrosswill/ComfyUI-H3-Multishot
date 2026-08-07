@@ -248,6 +248,12 @@ class H3ModelLoaderAny:
             if cls is None:
                 raise RuntimeError(
                     "ComfyUI-GGUF not loaded - install/enable it and restart.")
+            # ComfyUI-GGUF rejects unknown architectures before reading any
+            # tensor, and upstream does not know minimax_h3. Import-time
+            # patching covers the normal case (GGUF sorts before H3 in
+            # custom_nodes); re-assert here in case it loaded after us.
+            from .h3_gguf_arch import ensure_minimax_arch
+            ensure_minimax_arch()
             return cls().load_unet(model_name)
         import comfy.sd
         path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
