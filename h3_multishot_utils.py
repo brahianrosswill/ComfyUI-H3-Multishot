@@ -689,16 +689,6 @@ class H3MultishotSampler:
                            "image; later shots continue chaining from the "
                            "previous shot's last frame as usual. Leave "
                            "unconnected for pure text-to-video."}),
-            "self_anchor_voice": ("BOOLEAN", {
-                "default": False, "label_on": "anchor to shot 1's voice",
-                "label_off": "off",
-                "tooltip": "AUTOMATIC voice identity: after shot 1 renders, "
-                           "its own audio becomes the reference (<Audio 1>) "
-                           "for every later shot - the voice the model "
-                           "actually performed is pinned, no file needed. "
-                           "Write shot 1 so the character speaks a clean "
-                           "solo line. An external voice_ref, if connected, "
-                           "takes priority. Use with a ref2va checkpoint."}),
             "voice_ref": ("AUDIO", {
                 "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
                            "reference audio (<Audio 1>). Feed a clean solo "
@@ -720,6 +710,19 @@ class H3MultishotSampler:
                 "default": "simple",
                 "tooltip": "Sigma schedule. simple is the default and what "
                            "the docs measured."}),
+            # NEW WIDGETS GO LAST, ALWAYS: saved canvases map widgets_values
+            # by index, and a widget inserted mid-list silently shifts every
+            # value after it on the next load (the v1.4 lesson).
+            "self_anchor_voice": ("BOOLEAN", {
+                "default": False, "label_on": "anchor to shot 1's voice",
+                "label_off": "off",
+                "tooltip": "AUTOMATIC voice identity: after shot 1 renders, "
+                           "its own audio becomes the reference (<Audio 1>) "
+                           "for every later shot - the voice the model "
+                           "actually performed is pinned, no file needed. "
+                           "Write shot 1 so the character speaks a clean "
+                           "solo line. An external voice_ref, if connected, "
+                           "takes priority. Use with a ref2va checkpoint."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -730,8 +733,8 @@ class H3MultishotSampler:
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
             width, height, frames_per_shot, seed, steps,
             seed_per_shot=False, start_image=None, voice_ref=None,
-            self_anchor_voice=False,
-            sampler_name="res_multistep", scheduler="simple"):
+            sampler_name="res_multistep", scheduler="simple",
+            self_anchor_voice=False):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
