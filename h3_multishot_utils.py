@@ -419,10 +419,31 @@ class H3ModelLoaderAny:
                     "ComfyUI-GGUF not loaded - install/enable it and restart.")
             # ComfyUI-GGUF rejects unknown architectures before reading any
             # tensor, and upstream does not know minimax_h3. Import-time
-            # patching covers the normal case (GGUF sorts before H3 in
-            # custom_nodes); re-assert here in case it loaded after us.
-            from .h3_gguf_arch import ensure_minimax_arch
-            ensure_minimax_arch()
+            # patching covers the packaged install; re-assert here in case
+            # ComfyUI-GGUF loaded after us. The relative import only exists
+            # in the packaged install - LOOSE-FILE installs (this file
+            # dropped straight into custom_nodes/) have no parent package,
+            # so fall back to doing the patch inline.
+            try:
+                from .h3_gguf_arch import ensure_minimax_arch
+                ensure_minimax_arch()
+            except ImportError:
+                import sys as _sys
+                for _m in list(_sys.modules.values()):
+                    try:
+                        if (_m is not None
+                                and isinstance(getattr(_m, "IMG_ARCH_LIST",
+                                                       None), set)
+                                and hasattr(_m, "TXT_ARCH_LIST")):
+                            if "minimax_h3" not in _m.IMG_ARCH_LIST:
+                                _m.IMG_ARCH_LIST.add("minimax_h3")
+                                print("[H3ModelLoader] taught ComfyUI-GGUF "
+                                      "the 'minimax_h3' architecture (in "
+                                      "memory, loose-file fallback)",
+                                      flush=True)
+                            break
+                    except Exception:
+                        continue
             return cls().load_unet(model_name)
         import comfy.sd
         path = folder_paths.get_full_path_or_raise("diffusion_models", model_name)
