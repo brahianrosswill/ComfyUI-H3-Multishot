@@ -713,6 +713,15 @@ class H3MultishotSampler:
             # NEW WIDGETS GO LAST, ALWAYS: saved canvases map widgets_values
             # by index, and a widget inserted mid-list silently shifts every
             # value after it on the next load (the v1.4 lesson).
+            "sampler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a sampler NAME here (e.g. from H3 Studio "
+                           "Controls) to drive this widget from one master "
+                           "source. Overrides sampler_name when connected."}),
+            "scheduler_override": ("STRING", {
+                "forceInput": True,
+                "tooltip": "Link a scheduler NAME here to single-source it. "
+                           "Overrides scheduler when connected."}),
             "self_anchor_voice": ("BOOLEAN", {
                 "default": False, "label_on": "anchor to shot 1's voice",
                 "label_off": "off",
@@ -734,7 +743,12 @@ class H3MultishotSampler:
             width, height, frames_per_shot, seed, steps,
             seed_per_shot=False, start_image=None, voice_ref=None,
             sampler_name="res_multistep", scheduler="simple",
+            sampler_override=None, scheduler_override=None,
             self_anchor_voice=False):
+        if sampler_override and str(sampler_override).strip():
+            sampler_name = str(sampler_override).strip()
+        if scheduler_override and str(scheduler_override).strip():
+            scheduler = str(scheduler_override).strip()
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs

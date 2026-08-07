@@ -485,7 +485,7 @@ class H3StudioControls:
             "scheduler": (_scheduler_names_sc(), {"default": "beta"}),
         }}
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "COMBO", "COMBO")
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "STRING", "STRING")
     RETURN_NAMES = ("width", "height", "frames_per_shot", "steps",
                     "sampler_name", "scheduler")
     FUNCTION = "emit"
@@ -516,6 +516,60 @@ def _scheduler_names_sc():
         return ["beta", "normal", "simple", "beta57"]
 
 
+
+
+class H3SamplerByName:
+    """STRING -> SAMPLER. Lets one master widget drive samplers everywhere:
+    combo-to-combo LINKS are rejected by the frontend's type check, but a
+    STRING output into this adapter gives core SamplerCustomAdvanced a real
+    SAMPLER object."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {"sampler_name": ("STRING", {
+            "forceInput": True,
+            "tooltip": "e.g. euler / res_multistep / res_2s - any name "
+                       "KSamplerSelect would offer."})}}
+
+    RETURN_TYPES = ("SAMPLER",)
+    FUNCTION = "get"
+    CATEGORY = "video/minimax"
+
+    def get(self, sampler_name):
+        import comfy.samplers
+        name = (sampler_name or "").strip()
+        try:
+            return (comfy.samplers.sampler_object(name),)
+        except Exception:
+            raise ValueError(
+                "[H3SamplerByName] unknown sampler %r. Valid: %s"
+                % (name, ", ".join(comfy.samplers.KSampler.SAMPLERS[:20])))
+
+
+class H3SigmasByName:
+    """model + STRING scheduler + steps -> SIGMAS (BasicScheduler with the
+    scheduler chosen by a linked string instead of a per-node combo)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "model": ("MODEL",),
+            "scheduler": ("STRING", {"forceInput": True}),
+            "steps": ("INT", {"default": 12, "min": 1, "max": 100,
+                              "forceInput": True}),
+            "denoise": ("FLOAT", {"default": 1.0, "min": 0.0, "max": 1.0}),
+        }}
+
+    RETURN_TYPES = ("SIGMAS",)
+    FUNCTION = "get"
+    CATEGORY = "video/minimax"
+
+    def get(self, model, scheduler, steps, denoise=1.0):
+        from comfy_extras import nodes_custom_sampler as ncs
+        name = (scheduler or "").strip()
+        return (ncs.BasicScheduler().get_sigmas(model, name, steps, denoise)[0],)
+
+
 NODE_CLASS_MAPPINGS = {
     "H3EpisodeSplit": H3EpisodeSplit,
     "H3LastFrame": H3LastFrame,
@@ -523,6 +577,8 @@ NODE_CLASS_MAPPINGS = {
     "H3AutoRefs": H3AutoRefs,
     "H3RefBatch": H3RefBatch,
     "H3StudioControls": H3StudioControls,
+    "H3SamplerByName": H3SamplerByName,
+    "H3SigmasByName": H3SigmasByName,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3EpisodeSplit": "H3 Episode Split (stage A + B)",
@@ -531,4 +587,6 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3AutoRefs": "H3 Auto Refs (folders, by prompt)",
     "H3RefBatch": "H3 Ref Batch (RefPicker -> ref slots)",
     "H3StudioControls": "H3 Studio Controls (one source, both stages)",
+    "H3SamplerByName": "H3 Sampler by Name (STRING -> SAMPLER)",
+    "H3SigmasByName": "H3 Sigmas by Name (STRING -> SIGMAS)",
 }
