@@ -457,12 +457,72 @@ class H3RefBatch:
         return tuple(out + [prompt_out, report])
 
 
+class H3StudioControls:
+    """ONE set of widgets that drives BOTH stages of the studio graph.
+
+    The two-stage chain has duplicated settings (stage A's conditioning node
+    and stage B's multishot sampler each carry width/height/frames/steps/
+    sampler/scheduler). Editing one and forgetting the other produces
+    mismatched renders that fail at the concat - or worse, succeed at two
+    different qualities. This node is the single source: wire its outputs to
+    both stages and there is exactly one place to change anything.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "width": ("INT", {"default": 768, "min": 32, "max": 4096,
+                              "step": 32}),
+            "height": ("INT", {"default": 1344, "min": 32, "max": 4096,
+                               "step": 32}),
+            "frames_per_shot": ("INT", {
+                "default": 362, "min": 5, "max": 481, "step": 17,
+                "tooltip": "H3's 17k+5 grid at 24fps. 362 = ~15.1s, the "
+                           "trained max. Drives stage A's length AND stage "
+                           "B's per-shot length."}),
+            "steps": ("INT", {"default": 12, "min": 1, "max": 50}),
+            "sampler_name": (_sampler_names_sc(), {"default": "euler"}),
+            "scheduler": (_scheduler_names_sc(), {"default": "beta"}),
+        }}
+
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "COMBO", "COMBO")
+    RETURN_NAMES = ("width", "height", "frames_per_shot", "steps",
+                    "sampler_name", "scheduler")
+    FUNCTION = "emit"
+    CATEGORY = "video/minimax"
+
+    def emit(self, width, height, frames_per_shot, steps,
+             sampler_name, scheduler):
+        print(f"[H3StudioControls] {width}x{height}, {frames_per_shot}f/shot, "
+              f"{steps} steps, {sampler_name}/{scheduler} -> both stages",
+              flush=True)
+        return (width, height, frames_per_shot, steps,
+                sampler_name, scheduler)
+
+
+def _sampler_names_sc():
+    try:
+        import comfy.samplers
+        return comfy.samplers.KSampler.SAMPLERS
+    except Exception:
+        return ["euler", "res_multistep", "res_2s"]
+
+
+def _scheduler_names_sc():
+    try:
+        import comfy.samplers
+        return comfy.samplers.KSampler.SCHEDULERS
+    except Exception:
+        return ["beta", "normal", "simple", "beta57"]
+
+
 NODE_CLASS_MAPPINGS = {
     "H3EpisodeSplit": H3EpisodeSplit,
     "H3LastFrame": H3LastFrame,
     "H3ConcatAV": H3ConcatAV,
     "H3AutoRefs": H3AutoRefs,
     "H3RefBatch": H3RefBatch,
+    "H3StudioControls": H3StudioControls,
 }
 NODE_DISPLAY_NAME_MAPPINGS = {
     "H3EpisodeSplit": "H3 Episode Split (stage A + B)",
@@ -470,4 +530,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3ConcatAV": "H3 Concat A/V",
     "H3AutoRefs": "H3 Auto Refs (folders, by prompt)",
     "H3RefBatch": "H3 Ref Batch (RefPicker -> ref slots)",
+    "H3StudioControls": "H3 Studio Controls (one source, both stages)",
 }

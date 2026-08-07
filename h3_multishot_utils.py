@@ -679,6 +679,19 @@ class H3MultishotSampler:
                            "image; later shots continue chaining from the "
                            "previous shot's last frame as usual. Leave "
                            "unconnected for pure text-to-video."}),
+            "voice_ref": ("AUDIO", {
+                "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
+                           "reference audio (<Audio 1>). Feed a clean solo "
+                           "line of the character - e.g. a slice of stage A's "
+                           "output - and the voice is PINNED across the chain "
+                           "instead of re-performed from text (verified: "
+                           "control drifted, voice-ref held). Bind it in each "
+                           "shot's prompt: 'Her voice is the voice in "
+                           "<Audio 1>.' Works with keyframe chaining via the "
+                           "refs+keyframes merge patch. NOTE: verified on the "
+                           "ref2va checkpoint; fl2va was not trained with "
+                           "reference rows, so wire the ref2va model when "
+                           "using this."}),
             "sampler_name": (_sampler_names(), {
                 "default": "res_multistep",
                 "tooltip": "Sampling algorithm. res_multistep is the default "
@@ -696,13 +709,39 @@ class H3MultishotSampler:
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
             width, height, frames_per_shot, seed, steps,
-            seed_per_shot=False, start_image=None,
+            seed_per_shot=False, start_image=None, voice_ref=None,
             sampler_name="res_multistep", scheduler="simple"):
         import torch
         import node_helpers
         from comfy_extras import nodes_custom_sampler as ncs
         from comfy_extras import nodes_minimax_h3 as mmh3
         from comfy_extras.nodes_audio import vae_decode_audio
+
+        # --- voice anchor: encode ONCE, ride in every shot's conditioning ---
+        voice_block = None
+        if voice_ref is not None:
+            wav = voice_ref["waveform"]
+            if wav.ndim == 2:
+                wav = wav.unsqueeze(0)
+            wav = wav[:1]
+            if wav.shape[1] == 1:              # mono crashes the packed layout
+                wav = wav.repeat(1, 2, 1)
+            elif wav.shape[1] > 2:
+                wav = wav[:, :2]
+            sr = int(voice_ref["sample_rate"])
+            vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+            if sr != vae_sr:
+                import torchaudio
+                wav = torchaudio.functional.resample(wav, sr, vae_sr)
+                sr = vae_sr
+            limit = 15 * sr                    # ref rows cost speed EVERY step
+            if wav.shape[-1] > limit:
+                wav = wav[..., :limit]
+            vz = audio_vae.encode(wav.movedim(1, -1))     # [1, 32, 2, T]
+            voice_block = {"kind": "audio", "ref_audio_t": vz.shape[-1],
+                           "audio_latent": vz}
+            print(f"[H3Multishot] voice anchor: {wav.shape[-1]/sr:.1f}s ref "
+                  f"audio rides in every shot as <Audio 1>.", flush=True)
 
         shots = _parse_script(script)
         n = shot_count if shot_count > 0 else len(shots)
@@ -739,7 +778,17 @@ class H3MultishotSampler:
                 img = mmh3._resize(prev_last[:1], width, height, "disabled")
                 images.append(img)
                 keyframes.append({"resolved_frame_index": 0, "image": img})
-            tokens = clip.tokenize(prompt, images=images)
+            if voice_block is not None:
+                # ref-items presentation: the chain frame keeps its
+                # <Picture 1> slot, the voice gets <Audio 1>. Payload-side the
+                # keyframe latent and the audio ref row COMPOSE via the
+                # refs+keyframes merge patch (h3_avbank_probe) - without that
+                # patch comfy's refs branch would discard the keyframe latent.
+                items = [{"type": "image", "data": im} for im in images]
+                items.append({"type": "audio"})
+                tokens = clip.tokenize(prompt, minimax_ref_items=items)
+            else:
+                tokens = clip.tokenize(prompt, images=images)
             cond = clip.encode_from_tokens_scheduled(tokens)
             if keyframes:
                 for kf in keyframes:
@@ -747,6 +796,10 @@ class H3MultishotSampler:
                 cond = node_helpers.conditioning_set_values(cond, {
                     "minimax_keyframes": keyframes,
                     "minimax_frame_count": frame_count,
+                })
+            if voice_block is not None:
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_refs": [voice_block],
                 })
             # --- free the text encoder before the DiT loads -----------------
             # The 32B VL encoder (~16.5GB even at Q4) and the H3 DiT (~25GB) do
