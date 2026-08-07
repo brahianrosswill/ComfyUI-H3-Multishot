@@ -184,6 +184,173 @@ class H3ScriptSplit:
         return (shots[0], shots[1], shots[2], shots[3], n)
 
 
+# ---------------------------------------------------------------------------
+# AUTO ACTIVATION RESERVE
+#
+# VRAM has two tenants with opposite tolerance for being remote. WEIGHTS
+# stream well: sequential, known order, prefetched behind ~50s of compute per
+# step, so 20GB offloaded costs well under a second. The ALLOCATOR POOL
+# (activations) does not stream: it is random-access and re-touched all step,
+# and when it does not fit, the driver evicts blind mid-step. Measured on a
+# 3090: starving the pool by ~3GB = 533 s/it vs 99 s/it. Measured on a 5090:
+# 168W at "99% utilisation" - a card waiting, not computing.
+#
+# So the correct split is reserve >= pool, and stream whatever weights do not
+# fit - overshooting is nearly free, undershooting is 5-10x. The pool scales
+# with the render shape, which is why any hand-set number (a GB figure, a
+# memory_usage_factor) is correct for exactly one resolution and a trap at
+# every other: LOWER the resolution with a fixed factor and the reserve
+# shrinks below the pool - the render gets SLOWER, the opposite of what any
+# person expects.
+#
+# This engine removes the knob:
+#   - memory_required(input_shape) is overridden with a function of the
+#     ACTUAL shape comfy passes at load time - never a constant.
+#   - Unmeasured shapes reserve 60% of currently-free VRAM: generous enough
+#     to be cliff-proof at any resolution, and only slightly slower than
+#     optimal (a few more GB of weights stream).
+#   - Our samplers measure the true allocator peak of every run and cache it
+#     per (GPU, model, shape-cells) in the user dir. From the second run at
+#     a shape, the reserve is measured * 1.25 - per machine, no telemetry to
+#     read, no number to know.
+# ---------------------------------------------------------------------------
+
+_AUTO_FLOOR = 8 * 1024**3          # never reserve less: workspaces + margin
+_AUTO_FRACTION = 0.60              # unmeasured shapes: fraction of free VRAM
+_AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
+_auto_cache = None                 # lazy {key: pool_bytes}
+_auto_last = {"key": None, "model": None}   # what the next sampling run is
+
+
+def _auto_cache_path():
+    try:
+        import folder_paths
+        base = folder_paths.get_user_directory()
+    except Exception:
+        import os
+        base = os.path.dirname(os.path.abspath(__file__))
+    import os
+    return os.path.join(base, "h3_auto_reserve.json")
+
+
+def _auto_cache_load():
+    global _auto_cache
+    if _auto_cache is None:
+        import io as _io, os
+        _auto_cache = {}
+        p = _auto_cache_path()
+        if os.path.isfile(p):
+            try:
+                _auto_cache = json.load(_io.open(p, encoding="utf-8"))
+            except Exception:
+                _auto_cache = {}
+    return _auto_cache
+
+
+def _auto_cache_store(key, pool_bytes):
+    cache = _auto_cache_load()
+    prev = cache.get(key, 0)
+    # keep the largest pool ever seen for the shape; shrinking on a lucky
+    # run risks the cliff on the next unlucky one
+    if pool_bytes <= prev:
+        return
+    cache[key] = int(pool_bytes)
+    try:
+        import io as _io
+        _io.open(_auto_cache_path(), "w", encoding="utf-8").write(
+            json.dumps(cache, indent=1))
+    except Exception as e:
+        print(f"[H3AutoReserve] cache write failed ({e}) - measurements "
+              f"will not persist across restarts", flush=True)
+
+
+def _auto_key(model_name, cells):
+    try:
+        import torch
+        dev = torch.cuda.get_device_name(0)
+    except Exception:
+        dev = "cpu"
+    import os
+    stem = os.path.splitext(os.path.basename(model_name))[0]
+    return f"{dev}|{stem}|{cells}"
+
+
+def _install_auto_reserve(patcher, model_name):
+    """Shape-aware memory_required on the BaseModel (clone-safe)."""
+
+    def memory_required(input_shape, *args, **kwargs):
+        cells = 1
+        try:
+            for d in list(input_shape)[1:]:
+                cells *= int(d)
+        except Exception:
+            cells = 0
+        key = _auto_key(model_name, cells)
+        _auto_last["key"] = key
+        measured = _auto_cache_load().get(key)
+        if measured:
+            reserve = max(int(measured * _AUTO_MARGIN), _AUTO_FLOOR)
+            how = f"measured pool {measured/2**30:.1f} GB x {_AUTO_MARGIN}"
+        else:
+            try:
+                import comfy.model_management as mm
+                free = mm.get_free_memory(mm.get_torch_device())
+            except Exception:
+                free = 24 * 1024**3
+            reserve = max(int(free * _AUTO_FRACTION), _AUTO_FLOOR)
+            how = f"first run at this shape: {_AUTO_FRACTION:.0%} of free"
+        print(f"[H3AutoReserve] shape cells={cells}: reserving "
+              f"{reserve/2**30:.1f} GB ({how})", flush=True)
+        return reserve
+
+    patcher.model.memory_required = memory_required
+    patcher.memory_required = memory_required
+    _auto_last["model"] = model_name
+
+
+def _auto_measure_begin():
+    """Call right before sampling: snapshot the allocator."""
+    try:
+        import torch
+        torch.cuda.reset_peak_memory_stats()
+        return torch.cuda.memory_reserved()
+    except Exception:
+        return None
+
+
+def _auto_measure_end(before, patcher=None):
+    """Call right after sampling: cache the pool this shape really used.
+
+    The DiT loads INSIDE the sampling call, so the raw reserved delta counts
+    resident weights as pool - subtract what the patcher actually has loaded
+    or the cache learns a number ~10-20GB too big and auto never tightens.
+    """
+    if before is None or _auto_last["key"] is None:
+        return
+    try:
+        import torch
+        peak = torch.cuda.max_memory_reserved()
+        loaded = 0
+        try:
+            loaded = int(patcher.loaded_size()) if patcher is not None else 0
+        except Exception:
+            try:
+                loaded = int(getattr(patcher.model,
+                                     "model_loaded_weight_memory", 0))
+            except Exception:
+                loaded = 0
+        pool = peak - before - loaded
+        if pool > 512 * 1024**2:            # ignore no-op runs
+            _auto_cache_store(_auto_last["key"], pool)
+            print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB for "
+                  f"this shape (peak {peak/2**30:.1f} - weights "
+                  f"{loaded/2**30:.1f}) - next run reserves "
+                  f"{max(pool*_AUTO_MARGIN, _AUTO_FLOOR)/2**30:.1f} GB",
+                  flush=True)
+    except Exception:
+        pass
+
+
 class H3ModelLoaderAny:
     """One dropdown, both formats: .safetensors loads through comfy core,
     .gguf routes through ComfyUI-GGUF (patched for minimax_h3). Keeps the
@@ -209,13 +376,13 @@ class H3ModelLoaderAny:
         return {"required": {"model_name": (names, {
             "tooltip": "safetensors or GGUF - loader routes automatically."})},
             "optional": {"activation_reserve_gb": ("FLOAT", {
-                "default": 0.0, "min": 0.0, "max": 24.0, "step": 0.5,
-                "tooltip": "0 = ComfyUI's own inference-memory estimate (VERY "
-                "conservative for H3 - at 736x1344x362f it reserves ~20 GB and "
-                "leaves the DiT nothing, streaming every weight from RAM). Set "
-                "a measured value (start ~8-10 for hi-res, ~5-6 for 544x960) to "
-                "reclaim the difference for resident weights. Too low = OOM "
-                "mid-sample: raise in 1-2 GB steps."})}}
+                "default": 0.0, "min": 0.0, "max": 128.0, "step": 0.5,
+                "tooltip": "0 = AUTO (recommended). The pack sizes the "
+                "activation reserve for the actual render shape, measures the "
+                "real peak each run, and tightens itself per machine - lower "
+                "resolutions get faster automatically. Set a number only to "
+                "pin the reserve by hand; that number is for ONE resolution "
+                "and the wrong number is 5-10x slower, not a little slower."})}}
 
     RETURN_TYPES = ("MODEL",)
     FUNCTION = "load"
@@ -223,8 +390,8 @@ class H3ModelLoaderAny:
 
     def load(self, model_name, activation_reserve_gb=0.0):
         out = self._load_inner(model_name)
+        patcher = out[0]
         if activation_reserve_gb and activation_reserve_gb > 0:
-            patcher = out[0]
             _cap = int(activation_reserve_gb * (1024 ** 3))
             # Must live on the inner BaseModel, not the ModelPatcher: LoRA
             # stacks and guiders clone() the patcher before sampling and an
@@ -232,9 +399,11 @@ class H3ModelLoaderAny:
             # restoring comfy's estimate. Clones share this BaseModel.
             patcher.model.memory_required = lambda *a, _c=_cap, **k: _c
             patcher.memory_required = lambda *a, _c=_cap, **k: _c
-            print(f"[H3ModelLoader] activation reserve OVERRIDDEN to "
-                  f"{activation_reserve_gb:.1f} GB (comfy estimate bypassed)",
-                  flush=True)
+            print(f"[H3ModelLoader] activation reserve PINNED at "
+                  f"{activation_reserve_gb:.1f} GB (manual - correct for one "
+                  f"resolution only; 0 = auto adapts to any)", flush=True)
+        else:
+            _install_auto_reserve(patcher, model_name)
         return out
 
     def _load_inner(self, model_name):
@@ -570,8 +739,10 @@ class H3MultishotSampler:
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
             shot_seed = (seed + si) if seed_per_shot else seed
             noise = ncs.RandomNoise().get_noise(shot_seed)[0]
+            _mb = _auto_measure_begin()
             out, _denoised = ncs.SamplerCustomAdvanced().sample(
                 noise, guider, sampler, sigmas, latent)
+            _auto_measure_end(_mb, model)
 
             lat = out["samples"]
             if getattr(lat, "is_nested", False):
@@ -749,8 +920,10 @@ class H3MultishotMemorySampler:
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
             shot_seed = (seed + si) if seed_per_shot else seed
             noise = ncs.RandomNoise().get_noise(shot_seed)[0]
+            _mb = _auto_measure_begin()
             out, _denoised = ncs.SamplerCustomAdvanced().sample(
                 noise, guider, sampler, sigmas, latent)
+            _auto_measure_end(_mb, model)
 
             lat = out["samples"]
             if getattr(lat, "is_nested", False):
