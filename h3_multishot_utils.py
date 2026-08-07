@@ -216,7 +216,15 @@ class H3ScriptSplit:
 # ---------------------------------------------------------------------------
 
 _AUTO_FLOOR = 8 * 1024**3          # never reserve less: workspaces + margin
-_AUTO_FRACTION = 0.60              # unmeasured shapes: fraction of free VRAM
+# First-run fraction of free VRAM. Deliberately HIGH: over-reserving merely
+# streams more weights (<1s/step behind 50-100s of compute), while
+# under-reserving is the 5-10x cliff. 0.60 was calibrated on a 32GB card and
+# proved WRONG on a 24GB one: 60% of the 3090's 21.9GB free = 13.2GB against
+# a ~17.5GB pool -> max_reserved 25.06GB on a 24GB card -> 492 s/it. At 0.88
+# the same card reserves 19.3GB and streams the difference. Measurement then
+# tightens DOWN from the safe side.
+_AUTO_FRACTION = 0.88              # unmeasured shapes: fraction of free VRAM
+_AUTO_WEIGHT_NUCLEUS = 2 * 1024**3  # always leave a little room for weights
 _AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
 _auto_cache = None                 # lazy {key: pool_bytes}
 _auto_last = {"key": None, "model": None}   # what the next sampling run is
@@ -307,7 +315,9 @@ def _install_auto_reserve(patcher, model_name):
                 free = mm.get_free_memory(mm.get_torch_device())
             except Exception:
                 free = 24 * 1024**3
-            reserve = max(int(free * _AUTO_FRACTION), _AUTO_FLOOR)
+            reserve = max(int(min(free * _AUTO_FRACTION,
+                                  free - _AUTO_WEIGHT_NUCLEUS)),
+                          _AUTO_FLOOR)
             how = f"first run at this shape: {_AUTO_FRACTION:.0%} of free"
         _auto_session[key] = reserve
         print(f"[H3AutoReserve] shape cells={cells}: reserving "
@@ -826,9 +836,14 @@ class H3MultishotSampler:
             shot_seed = (seed + si) if seed_per_shot else seed
             noise = ncs.RandomNoise().get_noise(shot_seed)[0]
             _mb = _auto_measure_begin()
-            out, _denoised = ncs.SamplerCustomAdvanced().sample(
-                noise, guider, sampler, sigmas, latent)
-            _auto_measure_end(_mb, model)
+            try:
+                out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                    noise, guider, sampler, sigmas, latent)
+            finally:
+                # record even on interrupt/OOM: the peak up to that moment is
+                # a valid LOWER bound on the pool, and the cache only grows -
+                # an aborted thrashing run should still teach the next one
+                _auto_measure_end(_mb, model)
 
             lat = out["samples"]
             if getattr(lat, "is_nested", False):
@@ -1007,9 +1022,14 @@ class H3MultishotMemorySampler:
             shot_seed = (seed + si) if seed_per_shot else seed
             noise = ncs.RandomNoise().get_noise(shot_seed)[0]
             _mb = _auto_measure_begin()
-            out, _denoised = ncs.SamplerCustomAdvanced().sample(
-                noise, guider, sampler, sigmas, latent)
-            _auto_measure_end(_mb, model)
+            try:
+                out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                    noise, guider, sampler, sigmas, latent)
+            finally:
+                # record even on interrupt/OOM: the peak up to that moment is
+                # a valid LOWER bound on the pool, and the cache only grows -
+                # an aborted thrashing run should still teach the next one
+                _auto_measure_end(_mb, model)
 
             lat = out["samples"]
             if getattr(lat, "is_nested", False):
