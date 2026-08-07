@@ -220,7 +220,20 @@ class H3ConcatAV:
             c = max(wa.shape[1], wb.shape[1])
             wa = wa.expand(-1, c, -1) if wa.shape[1] == 1 else wa
             wb = wb.expand(-1, c, -1) if wb.shape[1] == 1 else wb
-        audio = {"waveform": torch.cat((wa, wb), dim=-1), "sample_rate": sa}
+        # 40ms equal-power crossfade at the seam: the two stages are sampled
+        # independently, so a butt-join puts a step discontinuity in the
+        # waveform that reads as a click (confirmed by two independent audio
+        # reviewers at the stage A/B boundary).
+        k = min(int(sa * 0.04), wa.shape[-1], wb.shape[-1])
+        if k >= 8:
+            t = torch.linspace(0, 1, k, dtype=wa.dtype, device=wa.device)
+            fade_out = torch.cos(t * 3.14159265 / 2)
+            fade_in = torch.sin(t * 3.14159265 / 2)
+            seam = wa[..., -k:] * fade_out + wb[..., :k] * fade_in
+            audio = {"waveform": torch.cat((wa[..., :-k], seam, wb[..., k:]),
+                                           dim=-1), "sample_rate": sa}
+        else:
+            audio = {"waveform": torch.cat((wa, wb), dim=-1), "sample_rate": sa}
         return (images, audio)
 
 
