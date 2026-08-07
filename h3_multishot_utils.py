@@ -817,20 +817,33 @@ class H3MultishotSampler:
             # streams ~19GB from system RAM every step (60min vs ~15min renders).
             # Conditioning is already computed above, so the encoder weights are
             # safe to evict here; they reload next shot (chained prompts need it).
+            # MULTI-GPU (issue #8, @VladiCz): when the TE lives on a DIFFERENT
+            # device than the DiT there is nothing to reclaim - evicting just
+            # forces a full TE reload every shot (measured: a third of the
+            # whole render). Skip the eviction entirely in that case.
             import comfy.model_management as _mm
-            try:
-                clip.patcher.model.to(_mm.text_encoder_offload_device())
-            except Exception as _e:
-                print(f"[H3Multishot] TE offload skipped: {_e}", flush=True)
-            try:
-                _dev = _mm.get_torch_device()
-                _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
-                _mm.soft_empty_cache()
-                _free = _mm.get_free_memory(_dev) / (1024 ** 3)
-                print(f"[H3Multishot] TE evicted; {_free:.1f} GB free for the DiT",
-                      flush=True)
-            except Exception as _e:
-                print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
+            _te_dev = getattr(clip.patcher, "load_device", None)
+            _dit_dev = getattr(model, "load_device", None)
+            if (_te_dev is not None and _dit_dev is not None
+                    and str(_te_dev) != str(_dit_dev)):
+                if si == 0:
+                    print(f"[H3Multishot] TE on {_te_dev}, DiT on {_dit_dev} "
+                          f"- separate devices, TE stays resident (no "
+                          f"per-shot reload).", flush=True)
+            else:
+                try:
+                    clip.patcher.model.to(_mm.text_encoder_offload_device())
+                except Exception as _e:
+                    print(f"[H3Multishot] TE offload skipped: {_e}", flush=True)
+                try:
+                    _dev = _mm.get_torch_device()
+                    _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                    _mm.soft_empty_cache()
+                    _free = _mm.get_free_memory(_dev) / (1024 ** 3)
+                    print(f"[H3Multishot] TE evicted; {_free:.1f} GB free "
+                          f"for the DiT", flush=True)
+                except Exception as _e:
+                    print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
             # ----------------------------------------------------------------
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
             shot_seed = (seed + si) if seed_per_shot else seed
@@ -1005,18 +1018,27 @@ class H3MultishotMemorySampler:
                     "minimax_frame_count": frame_count,
                 })
 
-            try:
-                clip.patcher.model.to(_mm.text_encoder_offload_device())
-            except Exception:
-                pass
-            try:
-                _dev = _mm.get_torch_device()
-                _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
-                _mm.soft_empty_cache()
-                print("[H3Memory] TE evicted; %.1f GB free for the DiT"
-                      % (_mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
-            except Exception:
-                pass
+            # issue #8: separate TE device -> nothing to reclaim, keep it hot
+            _te_dev = getattr(clip.patcher, "load_device", None)
+            _dit_dev = getattr(model, "load_device", None)
+            if (_te_dev is not None and _dit_dev is not None
+                    and str(_te_dev) != str(_dit_dev)):
+                if si == 0:
+                    print(f"[H3Memory] TE on {_te_dev}, DiT on {_dit_dev} - "
+                          f"separate devices, TE stays resident.", flush=True)
+            else:
+                try:
+                    clip.patcher.model.to(_mm.text_encoder_offload_device())
+                except Exception:
+                    pass
+                try:
+                    _dev = _mm.get_torch_device()
+                    _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
+                    _mm.soft_empty_cache()
+                    print("[H3Memory] TE evicted; %.1f GB free for the DiT"
+                          % (_mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
+                except Exception:
+                    pass
 
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
             shot_seed = (seed + si) if seed_per_shot else seed
