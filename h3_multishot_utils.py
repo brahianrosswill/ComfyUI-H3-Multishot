@@ -842,10 +842,20 @@ class H3MultishotSampler:
                            "2048px short edge for best identity fidelity. "
                            "Reference tokens ride through every sampling "
                            "step, so 'max' can be several times slower."}),
+            "preview_first_shot": ("BOOLEAN", {
+                "default": False, "label_on": "save shot 1 early",
+                "label_off": "off",
+                "tooltip": "Write shot 1 to output/video/H3_FIRSTSHOT/ the "
+                           "MOMENT it finishes decoding - minutes before the "
+                           "full chain completes - so a bad take can be "
+                           "cancelled early. The full path is printed to the "
+                           "console. The first_shot_frames/audio OUTPUTS "
+                           "always carry shot 1 regardless of this toggle."}),
         }}
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
-    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "IMAGE", "AUDIO")
+    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered",
+                    "first_shot_frames", "first_shot_audio")
     FUNCTION = "run"
     CATEGORY = "sampling/minimax"
 
@@ -856,7 +866,8 @@ class H3MultishotSampler:
             sampler_override=None, scheduler_override=None,
             self_anchor_voice=False, two_pass_upscale=False,
             upscale_factor=1.5, pass1_fraction=0.65,
-            upscale_audio_denoise=0.35, reference_image_size="match"):
+            upscale_audio_denoise=0.35, reference_image_size="match",
+            preview_first_shot=False):
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -1132,6 +1143,34 @@ class H3MultishotSampler:
                 print(f"[H3Multishot] self-anchor: shot 1's voice "
                       f"({aw.shape[-1]/sr:.1f}s) is now <Audio 1> for the "
                       f"remaining {n - 1} shot(s).", flush=True)
+            if si == 0:
+                first_frames = imgs.detach().cpu()
+                _fw = wav if wav.ndim == 3 else wav.unsqueeze(0)
+                first_audio = {"waveform": _fw.detach().cpu(),
+                               "sample_rate": sr}
+                if preview_first_shot:
+                    # write shot 1 NOW - minutes before the chain finishes -
+                    # so a bad take can be cancelled instead of waited out
+                    try:
+                        import os
+                        from fractions import Fraction
+                        import folder_paths
+                        from comfy_api.latest import InputImpl, Types
+                        folder, fname, counter, _sub, _pfx = \
+                            folder_paths.get_save_image_path(
+                                "video/H3_FIRSTSHOT/firstshot",
+                                folder_paths.get_output_directory(),
+                                first_frames.shape[2], first_frames.shape[1])
+                        path = os.path.join(folder,
+                                            f"{fname}_{counter:05}_.mp4")
+                        InputImpl.VideoFromComponents(Types.VideoComponents(
+                            images=first_frames, audio=first_audio,
+                            frame_rate=Fraction(24))).save_to(path)
+                        print(f"[H3Multishot] FIRST-SHOT PREVIEW saved -> "
+                              f"{path}", flush=True)
+                    except Exception as _e:
+                        print(f"[H3Multishot] first-shot preview save failed "
+                              f"(render continues): {_e}", flush=True)
             if si > 0:
                 imgs = imgs[1:]                       # duplicated seam frame
                 trim = int(round(sr / 24.0))          # matching 1/24s audio
@@ -1143,7 +1182,8 @@ class H3MultishotSampler:
         waveform = _xfade_audio(audio_parts, sr)
         print(f"[H3Multishot] done: {n} shots, {master.shape[0]} frames "
               f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
-        return (master, {"waveform": waveform, "sample_rate": sr}, n)
+        return (master, {"waveform": waveform, "sample_rate": sr}, n,
+                first_frames, first_audio)
 
 
 
