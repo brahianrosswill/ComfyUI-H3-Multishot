@@ -472,6 +472,72 @@ class H3ModelLoaderAny:
         return (comfy.sd.load_diffusion_model(path),)
 
 
+_UPSCALER_UTILS = None
+
+
+def _load_upscaler_utils():
+    """Load ComfyUI-MiniMaxH3_LatentUpscaler's utils.py by path (cached).
+
+    Two-pass upscale reuses that pack's NestedTensor upscale + CONST re-noise
+    math rather than duplicating it. Works whether this file is installed
+    loose in custom_nodes or inside ComfyUI-H3-Multishot/.
+    """
+    global _UPSCALER_UTILS
+    if _UPSCALER_UTILS is not None:
+        return _UPSCALER_UTILS
+    import importlib.util
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(here, "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"),
+        os.path.join(os.path.dirname(here),
+                     "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"),
+    ]
+    try:
+        import folder_paths
+        for d in folder_paths.get_folder_paths("custom_nodes"):
+            candidates.append(
+                os.path.join(d, "ComfyUI-MiniMaxH3_LatentUpscaler", "utils.py"))
+    except Exception:
+        pass
+    for path in candidates:
+        if os.path.isfile(path):
+            spec = importlib.util.spec_from_file_location(
+                "h3_latent_upscaler_utils", path)
+            mod = importlib.util.module_from_spec(spec)
+            spec.loader.exec_module(mod)
+            _UPSCALER_UTILS = mod
+            return mod
+    raise RuntimeError(
+        "two_pass_upscale needs the ComfyUI-MiniMaxH3_LatentUpscaler pack "
+        "(github.com/Tr1dae/ComfyUI-MiniMaxH3_LatentUpscaler) installed in "
+        "custom_nodes - it provides the NestedTensor upscale/re-noise math.")
+
+
+def _upscale_av_exact(tr, latent_dict, target_h, target_w):
+    """Spatially upscale the VIDEO member of an AV latent to EXACT latent dims.
+
+    The pack's own upscaler works from a single scale_by, which can round to a
+    grid one cell off the requested resolution; sampling to a fixed widget
+    resolution needs exact dims so every shot decodes to width x height.
+    """
+    import torch.nn.functional as F
+    members, was_nested = tr.extract_tensor(latent_dict["samples"])
+    v = members[0]
+    orig = tuple(v.shape)
+    x = v
+    if len(orig) > 4:  # [B,C,T,H,W] -> [B*T,C,H,W]
+        x = x.reshape(orig[0], orig[1], -1, orig[-2], orig[-1])
+        x = x.movedim(2, 1).reshape(-1, orig[1], orig[-2], orig[-1])
+    x = F.interpolate(x, size=(target_h, target_w), mode="bilinear",
+                      align_corners=False)
+    if len(orig) > 4:
+        x = x.reshape(orig[0], -1, orig[1], target_h, target_w).movedim(2, 1)
+    out = latent_dict.copy()
+    out["samples"] = tr.wrap_tensor([x, *members[1:]], was_nested=was_nested)
+    return out
+
+
 def _sampler_names():
     """From core, so the list cannot rot out of step with ComfyUI."""
     try:
@@ -689,6 +755,14 @@ class H3MultishotSampler:
                            "image; later shots continue chaining from the "
                            "previous shot's last frame as usual. Leave "
                            "unconnected for pure text-to-video."}),
+            "reference_images": ("IMAGE", {
+                "tooltip": "Optional SUBJECT/CHARACTER reference images (batch "
+                           "= multiple refs, e.g. via Batch Images), carried "
+                           "into EVERY shot as <Picture 1>, <Picture 2>, ... "
+                           "- distinct from start_image (which only seeds the "
+                           "I2V chain frame). Bind them in each shot's prompt: "
+                           "'She looks like the woman in <Picture 1>.' "
+                           "Verified on the ref2va checkpoint."}),
             "voice_ref": ("AUDIO", {
                 "tooltip": "Optional VOICE ANCHOR carried into EVERY shot as a "
                            "reference audio (<Audio 1>). Feed a clean solo "
@@ -732,6 +806,42 @@ class H3MultishotSampler:
                            "Write shot 1 so the character speaks a clean "
                            "solo line. An external voice_ref, if connected, "
                            "takes priority. Use with a ref2va checkpoint."}),
+            "two_pass_upscale": ("BOOLEAN", {
+                "default": False, "label_on": "low-res pass + upscale",
+                "label_off": "single pass",
+                "tooltip": "EVERY SHOT renders pass 1 at width/upscale_factor "
+                           "through pass1_fraction of the steps, the latent is "
+                           "spatially upscaled to the full width x height, and "
+                           "the remaining steps finish at full res. Faster than "
+                           "a native full-res render and sharper than rendering "
+                           "low-res alone. Needs the "
+                           "ComfyUI-MiniMaxH3_LatentUpscaler pack installed "
+                           "(github.com/Tr1dae) - its re-noise math is used."}),
+            "upscale_factor": ("FLOAT", {
+                "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.05,
+                "tooltip": "Pass-1 renders at width/factor x height/factor "
+                           "(snapped to /32). Pass 2 always lands EXACTLY on "
+                           "width x height."}),
+            "pass1_fraction": ("FLOAT", {
+                "default": 0.65, "min": 0.1, "max": 0.95, "step": 0.05,
+                "tooltip": "Share of the steps spent in the low-res pass. "
+                           "Higher = faster + more stable composition, lower = "
+                           "more full-res refinement. 0.65 of 12 steps = 8 low "
+                           "+ 4 full."}),
+            "upscale_audio_denoise": ("FLOAT", {
+                "default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05,
+                "tooltip": "How hard pass 2 may rewrite the audio. 0 = pass-1 "
+                           "audio is locked (safest for voice identity), 1 = "
+                           "full remix. 0.35 = light polish that preserves the "
+                           "voice."}),
+            "reference_image_size": (["match", "max"], {
+                "default": "match",
+                "tooltip": "Reference image sizing. 'match' scales each ref "
+                           "(down only, keeping aspect) to the generation's "
+                           "pixel area; 'max' uses the reference pipeline's "
+                           "2048px short edge for best identity fidelity. "
+                           "Reference tokens ride through every sampling "
+                           "step, so 'max' can be several times slower."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -741,10 +851,12 @@ class H3MultishotSampler:
 
     def run(self, model, clip, video_vae, audio_vae, script, shot_count,
             width, height, frames_per_shot, seed, steps,
-            seed_per_shot=False, start_image=None, voice_ref=None,
-            sampler_name="res_multistep", scheduler="simple",
+            seed_per_shot=False, start_image=None, reference_images=None,
+            voice_ref=None, sampler_name="res_multistep", scheduler="simple",
             sampler_override=None, scheduler_override=None,
-            self_anchor_voice=False):
+            self_anchor_voice=False, two_pass_upscale=False,
+            upscale_factor=1.5, pass1_fraction=0.65,
+            upscale_audio_denoise=0.35, reference_image_size="match"):
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -781,6 +893,32 @@ class H3MultishotSampler:
             print(f"[H3Multishot] voice anchor: {wav.shape[-1]/sr:.1f}s ref "
                   f"audio rides in every shot as <Audio 1>.", flush=True)
 
+        # --- subject/character reference images (PR #10, @moonwhaler): encode
+        # ONCE, ride in every shot as fixed <Picture 1..N> slots - stable
+        # across the whole chain, same reasoning as the voice anchor. ---
+        import math
+        ref_image_items, ref_image_blocks = [], []
+        if reference_images is not None:
+            for i in range(reference_images.shape[0]):
+                img = reference_images[i:i + 1]
+                h, w = img.shape[1], img.shape[2]
+                if reference_image_size == "match":
+                    scale = min(1.0, math.sqrt((width * height) / (w * h)))
+                else:
+                    scale = min(1.0, mmh3.REF_IMAGE_SHORT_EDGE / min(w, h))
+                tw = max(mmh3.CANVAS_MULTIPLE,
+                         round(w * scale / mmh3.CANVAS_MULTIPLE) * mmh3.CANVAS_MULTIPLE)
+                th = max(mmh3.CANVAS_MULTIPLE,
+                         round(h * scale / mmh3.CANVAS_MULTIPLE) * mmh3.CANVAS_MULTIPLE)
+                resized = mmh3._resize(img, tw, th, "disabled")
+                z = video_vae.encode(resized)
+                ref_image_items.append({"type": "image", "data": resized})
+                ref_image_blocks.append({"kind": "image", "latent_h": th // 16,
+                                         "latent_w": tw // 16, "latent": z})
+            print(f"[H3Multishot] {len(ref_image_blocks)} reference image(s) "
+                  f"ride in every shot as <Picture 1..{len(ref_image_blocks)}>.",
+                  flush=True)
+
         shots = _parse_script(script)
         n = shot_count if shot_count > 0 else len(shots)
         if len(shots) > n:
@@ -796,6 +934,26 @@ class H3MultishotSampler:
         sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps, 1.0)[0]
         sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
 
+        # --- two-pass upscale setup: low-res pass 1, exact full-res pass 2 ---
+        tr = w1 = h1 = sig_hi = sig_lo = lat_th = lat_tw = None
+        if two_pass_upscale:
+            tr = _load_upscaler_utils()
+            f = max(1.0, float(upscale_factor))
+            w1 = max(32, int(round(width / f / 32)) * 32)
+            h1 = max(32, int(round(height / f / 32)) * 32)
+            k = int(round(steps * float(pass1_fraction)))
+            k = max(1, min(steps - 1, k))
+            sig_hi, sig_lo = sigmas[:k + 1], sigmas[k:]
+            probe, _ = mmh3._empty_av_latent(width, height, frames_per_shot)
+            pv = probe["samples"]
+            pv = pv.unbind()[0] if getattr(pv, "is_nested", False) else pv
+            lat_th, lat_tw = int(pv.shape[-2]), int(pv.shape[-1])
+            del probe, pv
+            print(f"[H3Multishot] two-pass: {w1}x{h1} for {k} steps -> "
+                  f"latent x{width / w1:.2f} -> {width}x{height} for "
+                  f"{steps - k} steps (audio_denoise "
+                  f"{upscale_audio_denoise}).", flush=True)
+
         frames_parts, audio_parts = [], []
         sr = None
         prev_last = None
@@ -809,25 +967,45 @@ class H3MultishotSampler:
         for si, prompt in enumerate(shots):
             print(f"[H3Multishot] shot {si + 1}/{n} "
                   f"({frames_per_shot}f @ {width}x{height})...", flush=True)
-            latent, frame_count = mmh3._empty_av_latent(
-                width, height, frames_per_shot)
-            images, keyframes = [], []
+            if two_pass_upscale:
+                latent, frame_count = mmh3._empty_av_latent(
+                    w1, h1, frames_per_shot)
+            else:
+                latent, frame_count = mmh3._empty_av_latent(
+                    width, height, frames_per_shot)
+            images, keyframes, keyframes_hi = [], [], []
             if prev_last is not None:
                 img = mmh3._resize(prev_last[:1], width, height, "disabled")
                 images.append(img)
-                keyframes.append({"resolved_frame_index": 0, "image": img})
-            if voice_block is not None:
-                # ref-items presentation: the chain frame keeps its
-                # <Picture 1> slot, the voice gets <Audio 1>. Payload-side the
-                # keyframe latent and the audio ref row COMPOSE via the
+                if two_pass_upscale:
+                    # pass-1 cond wants the keyframe latent on the LOW grid;
+                    # pass-2 cond re-encodes the same frame at full res (true
+                    # detail, not an interpolated latent). Vision tokens use
+                    # the full-res image either way.
+                    img_lo = mmh3._resize(prev_last[:1], w1, h1, "disabled")
+                    keyframes.append({"resolved_frame_index": 0,
+                                      "image": img_lo})
+                    keyframes_hi.append({"resolved_frame_index": 0,
+                                         "image": img})
+                else:
+                    keyframes.append({"resolved_frame_index": 0, "image": img})
+            if voice_block is not None or ref_image_blocks:
+                # ref-items presentation, in fixed order: the subject/character
+                # refs keep their <Picture 1..N> slots, the chain frame takes
+                # the next <Picture> slot, the voice gets <Audio 1>. Payload-
+                # side the keyframe latent and the ref rows COMPOSE via the
                 # refs+keyframes merge patch (h3_avbank_probe) - without that
                 # patch comfy's refs branch would discard the keyframe latent.
-                items = [{"type": "image", "data": im} for im in images]
-                items.append({"type": "audio"})
+                items = list(ref_image_items)
+                items.extend({"type": "image", "data": im} for im in images)
+                if voice_block is not None:
+                    items.append({"type": "audio"})
                 tokens = clip.tokenize(prompt, minimax_ref_items=items)
             else:
                 tokens = clip.tokenize(prompt, images=images)
-            cond = clip.encode_from_tokens_scheduled(tokens)
+            cond_base = clip.encode_from_tokens_scheduled(tokens)
+            cond = cond_base
+            cond_hi = cond_base if two_pass_upscale else None
             if keyframes:
                 for kf in keyframes:
                     kf["latent"] = video_vae.encode(kf.pop("image"))
@@ -835,10 +1013,25 @@ class H3MultishotSampler:
                     "minimax_keyframes": keyframes,
                     "minimax_frame_count": frame_count,
                 })
-            if voice_block is not None:
-                cond = node_helpers.conditioning_set_values(cond, {
-                    "minimax_refs": [voice_block],
+            if keyframes_hi:
+                for kf in keyframes_hi:
+                    kf["latent"] = video_vae.encode(kf.pop("image"))
+                cond_hi = node_helpers.conditioning_set_values(cond_hi, {
+                    "minimax_keyframes": keyframes_hi,
+                    "minimax_frame_count": frame_count,
                 })
+            refs = list(ref_image_blocks)
+            if voice_block is not None:
+                refs.append(voice_block)
+            if refs:
+                # image blocks before audio blocks, matching the item order
+                cond = node_helpers.conditioning_set_values(cond, {
+                    "minimax_refs": refs,
+                })
+                if cond_hi is not None:
+                    cond_hi = node_helpers.conditioning_set_values(cond_hi, {
+                        "minimax_refs": refs,
+                    })
             # --- free the text encoder before the DiT loads -----------------
             # The 32B VL encoder (~16.5GB even at Q4) and the H3 DiT (~25GB) do
             # not co-fit on a 32GB card: without this the DiT loads PARTIALLY and
@@ -874,12 +1067,38 @@ class H3MultishotSampler:
                     print(f"[H3Multishot] VRAM purge skipped: {_e}", flush=True)
             # ----------------------------------------------------------------
             guider = ncs.BasicGuider().get_guider(model, cond)[0]
+            guider_hi = (ncs.BasicGuider().get_guider(model, cond_hi)[0]
+                         if two_pass_upscale else None)
             shot_seed = (seed + si) if seed_per_shot else seed
             noise = ncs.RandomNoise().get_noise(shot_seed)[0]
             _mb = _auto_measure_begin()
             try:
-                out, _denoised = ncs.SamplerCustomAdvanced().sample(
-                    noise, guider, sampler, sigmas, latent)
+                if two_pass_upscale:
+                    out1, _d1 = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, sig_hi, latent)
+                    up = _upscale_av_exact(tr, out1, lat_th, lat_tw)
+                    s = max(0.0, min(1.0, float(upscale_audio_denoise)))
+                    members, was_nested = tr.extract_tensor(up["samples"])
+                    if was_nested and len(members) >= 2:
+                        if s <= 0.0:
+                            ridx, rstr = (0,), None
+                        elif s >= 1.0:
+                            ridx, rstr = (0, 1), None
+                        else:
+                            ridx, rstr = (0, 1), {0: 1.0, 1: s}
+                    else:
+                        ridx = rstr = None
+                    noise2 = ncs.RandomNoise().get_noise(shot_seed + 977)[0]
+                    up = tr.add_noise_nested_latent(
+                        model, noise2, sig_lo, up,
+                        renoise_indices=ridx, noise_strengths=rstr)
+                    up = tr.finalize_latent_for_handoff(up)
+                    out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                        ncs.DisableNoise().get_noise()[0], guider_hi,
+                        sampler, sig_lo, up)
+                else:
+                    out, _denoised = ncs.SamplerCustomAdvanced().sample(
+                        noise, guider, sampler, sigmas, latent)
             finally:
                 # record even on interrupt/OOM: the peak up to that moment is
                 # a valid LOWER bound on the pool, and the cache only grows -

@@ -603,3 +603,120 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "H3SamplerByName": "H3 Sampler by Name (STRING -> SAMPLER)",
     "H3SigmasByName": "H3 Sigmas by Name (STRING -> SIGMAS)",
 }
+
+
+class H3IntScale:
+    """INT scaler for derived resolutions: value / divide_by, snapped to a multiple.
+
+    Built for the TESTLAB two-pass upscale: pass-1 renders at master/1.5 and the
+    latent upscaler's x1.5 lands back exactly on the master resolution, so the
+    ConcatAV frame-size guard stays happy. Keep master width/height divisible by
+    (multiple * divide_by) - 48 for the defaults - or the round trip drifts.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "value": ("INT", {"forceInput": True}),
+            "divide_by": ("FLOAT", {"default": 1.5, "min": 0.1, "max": 16.0, "step": 0.05}),
+            "multiple": ("INT", {"default": 32, "min": 1, "max": 256}),
+        }}
+
+    RETURN_TYPES = ("INT",)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "scale"
+    CATEGORY = "H3/episode"
+
+    def scale(self, value, divide_by=1.5, multiple=32):
+        out = max(multiple, int(round(value / divide_by / multiple)) * multiple)
+        return (out,)
+
+NODE_CLASS_MAPPINGS["H3IntScale"] = H3IntScale
+NODE_DISPLAY_NAME_MAPPINGS["H3IntScale"] = "H3 Int Scale (divide + snap)"
+
+
+class _H3AnyT(str):
+    """Wildcard socket type: compares unequal to nothing, so any link is accepted."""
+    def __ne__(self, other):
+        return False
+
+_h3_any = _H3AnyT("*")
+
+
+class H3AnySwitch:
+    """Lazy A/B switch: only the branch the boolean selects is ever executed.
+
+    The unselected branch's upstream nodes are skipped entirely (ComfyUI lazy
+    inputs), so a switched-off feature costs zero compute and zero VRAM.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {"use_on": ("BOOLEAN", {"forceInput": True})},
+            "optional": {
+                "off_path": (_h3_any, {"lazy": True}),
+                "on_path": (_h3_any, {"lazy": True}),
+            },
+        }
+
+    RETURN_TYPES = (_h3_any,)
+    RETURN_NAMES = ("value",)
+    FUNCTION = "pick"
+    CATEGORY = "H3/episode"
+
+    def check_lazy_status(self, use_on, off_path=None, on_path=None):
+        return ["on_path" if use_on else "off_path"]
+
+    def pick(self, use_on, off_path=None, on_path=None):
+        v = on_path if use_on else off_path
+        if v is None:
+            raise ValueError(
+                "H3AnySwitch: the selected input (%s) is not connected"
+                % ("on_path" if use_on else "off_path"))
+        return (v,)
+
+
+class H3StudioSwitches:
+    """One labeled panel of feature toggles; each BOOLEAN output drives H3AnySwitch gates."""
+
+    FLAGS = [
+        ("two_pass_upscale", True),
+        ("sol_attn", True),
+        ("chunk_ffn", True),
+        ("spectrum", True),
+        ("block_cache", True),
+        ("dual_clock_sampler", False),
+        ("hybrid_cond", False),
+    ]
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {n: ("BOOLEAN", {"default": d}) for n, d in cls.FLAGS}}
+
+    RETURN_TYPES = tuple("BOOLEAN" for _ in FLAGS)
+    RETURN_NAMES = tuple(n for n, _ in FLAGS)
+    FUNCTION = "emit"
+    CATEGORY = "H3/episode"
+
+    def emit(self, **kw):
+        vals = dict(kw)
+        # INTERLOCK: the dual-clock euler sampler validates for a FULL sigma
+        # schedule (1.0 -> 0.0) and hard-rejects the split schedules two-pass
+        # produces. When both are on, dual_clock wins and two-pass is
+        # suppressed for this run instead of erroring out mid-queue.
+        if vals.get("dual_clock_sampler") and vals.get("two_pass_upscale"):
+            vals["two_pass_upscale"] = False
+            print("[H3StudioSwitches] dual_clock_sampler is ON -> "
+                  "two_pass_upscale suppressed for this run (the dual-clock "
+                  "sampler requires the full sigma schedule and rejects "
+                  "split schedules). Also use a standard full scheduler "
+                  "(simple/beta) with it - RES4SHO curves may not start at "
+                  "exactly sigma 1.0.", flush=True)
+        return tuple(vals[n] for n, _ in self.FLAGS)
+
+
+NODE_CLASS_MAPPINGS["H3AnySwitch"] = H3AnySwitch
+NODE_CLASS_MAPPINGS["H3StudioSwitches"] = H3StudioSwitches
+NODE_DISPLAY_NAME_MAPPINGS["H3AnySwitch"] = "H3 Any Switch (lazy A/B)"
+NODE_DISPLAY_NAME_MAPPINGS["H3StudioSwitches"] = "H3 Studio Switches (feature toggles)"
