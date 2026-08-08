@@ -823,11 +823,13 @@ class H3MultishotSampler:
                            "(snapped to /32). Pass 2 always lands EXACTLY on "
                            "width x height."}),
             "pass1_fraction": ("FLOAT", {
-                "default": 0.65, "min": 0.1, "max": 0.95, "step": 0.05,
+                "default": 0.4, "min": 0.1, "max": 0.95, "step": 0.05,
                 "tooltip": "Share of the steps spent in the low-res pass. "
-                           "Higher = faster + more stable composition, lower = "
-                           "more full-res refinement. 0.65 of 12 steps = 8 low "
-                           "+ 4 full."}),
+                           "0.4 is RENDER-VERIFIED clean; splits much past "
+                           "~0.5 start pass 2 at too low a sigma to erase the "
+                           "latent-upscale interpolation pattern and the "
+                           "output grows a ghost/moire lattice (A/B'd at 0.7 "
+                           "vs 0.4, same seed)."}),
             "upscale_audio_denoise": ("FLOAT", {
                 "default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05,
                 "tooltip": "How hard pass 2 may rewrite the audio. 0 = pass-1 "
@@ -865,7 +867,7 @@ class H3MultishotSampler:
             voice_ref=None, sampler_name="res_multistep", scheduler="simple",
             sampler_override=None, scheduler_override=None,
             self_anchor_voice=False, two_pass_upscale=False,
-            upscale_factor=1.5, pass1_fraction=0.65,
+            upscale_factor=1.5, pass1_fraction=0.4,
             upscale_audio_denoise=0.35, reference_image_size="match",
             preview_first_shot=False):
         if sampler_override and str(sampler_override).strip():
