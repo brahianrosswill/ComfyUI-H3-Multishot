@@ -157,9 +157,14 @@ class H3ConcatAV:
     def _match(self, images_a, images_b):
         import torch
         dev = "cuda" if torch.cuda.is_available() else "cpu"
-        na = images_a[-min(24, images_a.shape[0]):].to(dev)
-        step = max(1, images_b.shape[0] // 24)
-        nb = images_b[::step][:24].to(dev)
+        # WINDOWED: A's tail vs B's HEAD - those are the two sides the viewer
+        # actually sees touching. Sampling across all of B (the old behaviour)
+        # measures B's internal average, which sits above its head because the
+        # chain ratchets, so the head ends up over-blurred (measured -50..-72%
+        # at the seam - a softening snap instead of a match).
+        nwin = 24
+        na = images_a[-min(nwin, images_a.shape[0]):].to(dev)
+        nb = images_b[:min(nwin, images_b.shape[0])].to(dev)
         lap_a, lap_b = self._lap_var(na), self._lap_var(nb)
         ga, gb = self._gray(na), self._gray(nb)
         ma, sa = float(ga.mean()), float(ga.std())
@@ -167,11 +172,19 @@ class H3ConcatAV:
         sigma = 0.0
         if lap_b > lap_a * 1.15:
             ref = nb[len(nb) // 2:len(nb) // 2 + 1]
+            # CLAMPED: only accept a sigma whose result stays at or above
+            # 0.9 x A's level. Undershooting the target leaves a small step;
+            # overshooting produces the far more visible softening snap.
+            floor = lap_a * 0.9
             best = (float("inf"), 0.0)
-            for s in (0.3, 0.45, 0.6, 0.8, 1.0, 1.3, 1.6):
-                d = abs(self._lap_var(self._gauss(ref, s)) - lap_a)
-                if d < best[0]:
-                    best = (d, s)
+            s = 0.05
+            while s <= 1.6 + 1e-9:
+                got = self._lap_var(self._gauss(ref, s))
+                if got >= floor:
+                    d = abs(got - lap_a)
+                    if d < best[0]:
+                        best = (d, s)
+                s += 0.05
             sigma = best[1]
         gain = max(0.85, min(1.15, sa / max(sb, 1e-6)))
         off = ma - mb * gain

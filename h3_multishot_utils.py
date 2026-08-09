@@ -538,6 +538,103 @@ def _upscale_av_exact(tr, latent_dict, target_h, target_w):
     return out
 
 
+
+# ---------------------------------------------------------------------------
+# Chain gain control (seam sharpening)
+#
+# MEASURED 2026-08-08 on 6 real multishot renders, both rigs, no LoRA: every
+# content-continuous seam steps UP in texture energy by +25..47% (5-7x the
+# non-seam control), and because each shot tail becomes the next shot keyframe
+# anchor, the level COMPOUNDS - a 6-shot chain measured 3.3x sharper by its
+# last shot than its first. The loop: anchor at level L -> the model generates
+# its continuation at ~1.25-1.47 x L -> that output tail is the next anchor.
+# Gain > 1 in an autoregressive loop ratchets.
+#
+# These helpers measure texture energy (variance of a 3x3 Laplacian on luma)
+# and apply a separable gaussian, so the chain can be level-controlled.
+# ---------------------------------------------------------------------------
+
+def _cg_lap_var(img):
+    """Texture energy of an IMAGE batch [B,H,W,C] in 0..1: var of 3x3 laplacian."""
+    import torch
+    import torch.nn.functional as F
+    x = img if img.ndim == 4 else img.unsqueeze(0)
+    g = (x[..., 0] * 0.299 + x[..., 1] * 0.587 + x[..., 2] * 0.114).unsqueeze(1)
+    k = torch.tensor([[0., 1., 0.], [1., -4., 1.], [0., 1., 0.]],
+                     dtype=g.dtype, device=g.device).view(1, 1, 3, 3)
+    return float(F.conv2d(g, k, padding=1).var())
+
+
+def _cg_gauss(img, sigma):
+    """Separable gaussian blur on an IMAGE batch [B,H,W,C]."""
+    import torch
+    import torch.nn.functional as F
+    if sigma <= 0:
+        return img
+    r = max(1, int(round(sigma * 3)))
+    xs = torch.arange(-r, r + 1, dtype=img.dtype, device=img.device)
+    k = torch.exp(-(xs ** 2) / (2 * sigma * sigma))
+    k = k / k.sum()
+    v = img.permute(0, 3, 1, 2)                      # [B,C,H,W]
+    c = v.shape[1]
+    kh = k.view(1, 1, 1, -1).expand(c, 1, 1, k.numel())
+    v = F.conv2d(F.pad(v, (r, r, 0, 0), mode="reflect"), kh, groups=c)
+    kv = k.view(1, 1, -1, 1).expand(c, 1, k.numel(), 1)
+    v = F.conv2d(F.pad(v, (0, 0, r, r), mode="reflect"), kv, groups=c)
+    return v.permute(0, 2, 3, 1).clamp(0, 1)
+
+
+def _cg_sigma_for(img, target_lap, max_sigma=1.6):
+    """Smallest gaussian sigma bringing img texture energy down to target."""
+    if target_lap <= 0:
+        return 0.0
+    # fine steps: the lap response to sigma is steep below ~0.7, so a coarse
+    # grid overshoots badly (measured on synthetic texture: 0.3 -> 0.97x but
+    # 0.6 -> 0.31x). 0.05 keeps the landing within a few percent.
+    best_s, best_d = 0.0, abs(_cg_lap_var(img) - target_lap)
+    s = 0.05
+    while s <= max_sigma + 1e-9:
+        d = abs(_cg_lap_var(_cg_gauss(img, s)) - target_lap)
+        if d < best_d:
+            best_d, best_s = d, s
+        s += 0.05
+    return best_s
+
+
+
+def _cg_flatten(imgs, target, block=8, max_sigma=1.6):
+    """Level a shot to a constant texture energy: blur only, per block.
+
+    Sigma is searched on one representative frame per block (cheap) and then
+    smoothed across blocks so the correction cannot pump frame to frame.
+    Frames already at or below target are left untouched - this never
+    sharpens, so it can only remove drift, never invent detail.
+    """
+    import torch
+    n = imgs.shape[0]
+    if n == 0 or target <= 0:
+        return imgs, 0.0
+    idx = list(range(0, n, block))
+    sig = []
+    for i in idx:
+        f = imgs[i:i + 1]
+        sig.append(_cg_sigma_for(f, target, max_sigma)
+                   if _cg_lap_var(f) > target * 1.02 else 0.0)
+    # smooth (moving average of 3) so sigma cannot jump between blocks
+    sm = []
+    for j in range(len(sig)):
+        lo, hi = max(0, j - 1), min(len(sig), j + 2)
+        sm.append(sum(sig[lo:hi]) / (hi - lo))
+    if max(sm) <= 0.0:
+        return imgs, 0.0
+    out = imgs.clone()
+    for j, i in enumerate(idx):
+        s = sm[j]
+        if s > 0.02:
+            out[i:i + block] = _cg_gauss(imgs[i:i + block], s)
+    return out, (sum(sm) / len(sm))
+
+
 def _sampler_names():
     """From core, so the list cannot rot out of step with ComfyUI."""
     try:
@@ -853,6 +950,28 @@ class H3MultishotSampler:
                            "cancelled early. The full path is printed to the "
                            "console. The first_shot_frames/audio OUTPUTS "
                            "always carry shot 1 regardless of this toggle."}),
+            "chain_gain_control": (
+                ["off", "flatten", "anchor_level", "match_output", "frozen_anchor"], {
+                "default": "off",
+                "tooltip": "Fixes SEAM SHARPENING in chained shots. Measured: "
+                           "each shot tail anchors the next, and the model "
+                           "returns ~1.25-1.47x the anchor texture energy, so "
+                           "sharpness RATCHETS (3.3x over 6 shots) with a "
+                           "visible step at every seam. "
+                           "flatten = RECOMMENDED. Levels every shot to the "
+                           "house texture level per block, so head == tail == "
+                           "house: no ratchet AND no step at the seam. Blur "
+                           "only, never sharpens. "
+                           "match_output = lighter: matches each shot head to "
+                           "the house level with one blanket blur (leaves the "
+                           "within-shot ramp, so a small seam step remains). "
+                           "anchor_level = pre-compensate the ANCHOR ONLY by "
+                           "the measured gain so each shot lands at shot 1 "
+                           "level; no output pixel is altered (the anchor "
+                           "frame is dropped from the master anyway). "
+                           "frozen_anchor = DIAGNOSTIC: every shot anchors on "
+                           "shot 1 tail; flattens the ratchet but identity may "
+                           "drift - use to prove the loop, not to ship."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "IMAGE", "AUDIO")
@@ -869,7 +988,7 @@ class H3MultishotSampler:
             self_anchor_voice=False, two_pass_upscale=False,
             upscale_factor=1.5, pass1_fraction=0.4,
             upscale_audio_denoise=0.35, reference_image_size="match",
-            preview_first_shot=False):
+            preview_first_shot=False, chain_gain_control="off"):
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -970,6 +1089,15 @@ class H3MultishotSampler:
         frames_parts, audio_parts = [], []
         sr = None
         prev_last = None
+        # chain gain control state (see _cg_* helpers)
+        _cg_ref = None        # shot 1 tail texture level = the house level
+        _cg_anchor_lap = None # texture level of the anchor fed to THIS shot
+        _cg_gain = None       # measured per-hop gain (output head / anchor)
+        _cg_frozen = None     # frozen_anchor mode: shot 1 tail frame
+        _CG_WIN = 24          # frames per measurement window
+        if chain_gain_control != "off":
+            print(f"[H3Multishot] chain gain control: {chain_gain_control}",
+                  flush=True)
         if start_image is not None:
             # I2V: seed the chain so shot 1 uses the supplied frame as its
             # keyframe, exactly the way later shots use the previous shot's
@@ -988,14 +1116,40 @@ class H3MultishotSampler:
                     width, height, frames_per_shot)
             images, keyframes, keyframes_hi = [], [], []
             if prev_last is not None:
-                img = mmh3._resize(prev_last[:1], width, height, "disabled")
+                anchor = prev_last[:1]
+                if (chain_gain_control == "frozen_anchor"
+                        and _cg_frozen is not None):
+                    anchor = _cg_frozen
+                    print("[H3Multishot] chain: anchoring on shot 1 tail "
+                          "(frozen).", flush=True)
+                elif chain_gain_control == "anchor_level" and _cg_ref:
+                    # the model returns ~gain x the anchor texture energy, so
+                    # feed it an anchor at ref/gain and the shot lands at ref
+                    # seed value only - replaced by the measured gain after
+                    # the first hop. 1.20 is what this stack actually returns
+                    # (measured 1.197 three hops running with a frozen anchor,
+                    # and 1.18 adaptively); the old 1.35 guess made shot 2
+                    # land ~6% under the house level before converging.
+                    g = _cg_gain if _cg_gain and _cg_gain > 1.0 else 1.20
+                    target = _cg_ref / g
+                    cur = _cg_lap_var(anchor)
+                    if cur > target * 1.02:
+                        sig = _cg_sigma_for(anchor, target)
+                        if sig > 0:
+                            anchor = _cg_gauss(anchor, sig)
+                            print(f"[H3Multishot] chain: anchor pre-compensated "
+                                  f"sigma {sig:.2f} ({cur:.5f} -> "
+                                  f"{_cg_lap_var(anchor):.5f}, target "
+                                  f"{target:.5f}, gain est {g:.2f})", flush=True)
+                _cg_anchor_lap = _cg_lap_var(anchor)
+                img = mmh3._resize(anchor, width, height, "disabled")
                 images.append(img)
                 if two_pass_upscale:
                     # pass-1 cond wants the keyframe latent on the LOW grid;
                     # pass-2 cond re-encodes the same frame at full res (true
                     # detail, not an interpolated latent). Vision tokens use
                     # the full-res image either way.
-                    img_lo = mmh3._resize(prev_last[:1], w1, h1, "disabled")
+                    img_lo = mmh3._resize(anchor, w1, h1, "disabled")
                     keyframes.append({"resolved_frame_index": 0,
                                       "image": img_lo})
                     keyframes_hi.append({"resolved_frame_index": 0,
@@ -1128,6 +1282,55 @@ class H3MultishotSampler:
             aud = vae_decode_audio(audio_vae, out)
             sr = aud["sample_rate"]
             wav = aud["waveform"]
+
+            # --- chain gain control: measure this hop, then level it ---
+            if chain_gain_control != "off":
+                _w = min(_CG_WIN, imgs.shape[0])
+                head_lap = _cg_lap_var(imgs[:_w])
+                if si == 0:
+                    # shot 1 opens with an exposure fade-in (measured luma
+                    # 0.227 -> 0.468 over ~1.7s), so the house level comes
+                    # from the SETTLED tail, never the opening frames
+                    _cg_ref = _cg_lap_var(imgs[-_w:])
+                    _cg_frozen = imgs[-1:].clone()
+                    print(f"[H3Multishot] chain: house texture level "
+                          f"{_cg_ref:.5f} (shot 1 tail)", flush=True)
+                    if chain_gain_control == "flatten":
+                        # level shot 1 too, but only its post-fade portion:
+                        # frames under the target are left alone by _cg_flatten
+                        imgs, _s = _cg_flatten(imgs, _cg_ref)
+                        if _s > 0:
+                            print(f"[H3Multishot] chain: shot 1 levelled "
+                                  f"(mean sigma {_s:.2f})", flush=True)
+                        _cg_frozen = imgs[-1:].clone()
+                else:
+                    if _cg_anchor_lap:
+                        hop = head_lap / max(_cg_anchor_lap, 1e-9)
+                        _cg_gain = hop if _cg_gain is None else (
+                            0.5 * _cg_gain + 0.5 * hop)
+                        print(f"[H3Multishot] chain: shot {si + 1} hop gain "
+                              f"{hop:.3f} (head {head_lap:.5f} / anchor "
+                              f"{_cg_anchor_lap:.5f}); vs house "
+                              f"{head_lap / max(_cg_ref, 1e-9) - 1.0:+.1%}",
+                              flush=True)
+                    if chain_gain_control == "flatten" and _cg_ref:
+                        imgs, _s = _cg_flatten(imgs, _cg_ref)
+                        if _s > 0:
+                            print(f"[H3Multishot] chain: shot levelled to "
+                                  f"house (mean sigma {_s:.2f}; head "
+                                  f"{_cg_lap_var(imgs[:_w]):.5f} tail "
+                                  f"{_cg_lap_var(imgs[-_w:]):.5f} vs house "
+                                  f"{_cg_ref:.5f})", flush=True)
+                    if chain_gain_control == "match_output" and _cg_ref:
+                        if head_lap > _cg_ref * 1.05:
+                            sig = _cg_sigma_for(imgs[:_w], _cg_ref)
+                            if sig > 0:
+                                imgs = _cg_gauss(imgs, sig)
+                                print(f"[H3Multishot] chain: shot matched to "
+                                      f"house level, sigma {sig:.2f} (head "
+                                      f"{head_lap:.5f} -> "
+                                      f"{_cg_lap_var(imgs[:_w]):.5f})",
+                                      flush=True)
 
             prev_last = imgs[-1:].clone()
             if si == 0 and self_anchor_voice and voice_block is None:
