@@ -153,6 +153,21 @@ All four of these are in the writer half of the pack
 (`ComfyUI_JoyAI_Echo_GGUF_Nodes`), so they only matter if you let the LLM write
 the shots. If you paste your own prompt list, nothing here changes for you.
 
+- **Reference images had no way in.** The sampler's `reference_images`
+  input has always existed, and `SETTINGS.md` documented it — as `unwired`,
+  because nothing in the workflow was connected to it. There is now a
+  **REFERENCE** lane in the anchors column (two image loaders → `ImageBatch` →
+  a gate), shipped with the gate **off** so nothing changes until you turn it
+  on. This is the one item here that is a new capability rather than a repair.
+- **A stale prompt-set filename blocked the whole queue.** ComfyUI validates
+  every combo value in a graph before it will run anything, so if
+  `RiftPromptSource`'s saved `source_file` no longer existed — a renamed
+  folder, a workflow shared from another machine, or simply the prompt lane
+  switched to manual — the run died with `Value not in list` and *nothing*
+  executed, including the lanes that were fine. The node now declares
+  `VALIDATE_INPUTS`, so the filename is only resolved if the node actually
+  runs; switching to manual genuinely disables it. If it does run and the file
+  is missing, the error names the file.
 - **Every story came out 15 shots.** The system prompt ordered exactly 15 when
   the brief didn't ask for a count, so the LLM never got to decide. It now
   counts the story's beats and lands where the story lands — measured 4–7 on

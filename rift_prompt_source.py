@@ -182,6 +182,16 @@ class RiftPromptSource:
     CATEGORY = "Rift"
 
     @classmethod
+    def VALIDATE_INPUTS(cls, source_file=None, folder=None, **kwargs):
+        # ComfyUI checks every combo value in the graph BEFORE it will queue
+        # anything, so a saved source_file that no longer exists - a renamed
+        # folder, a shared workflow, or simply the prompt lane switched off -
+        # failed the whole prompt with "Value not in list" and nothing ran.
+        # The file only matters if this node actually executes; accept any
+        # value here and let load() raise a message that names the file.
+        return True
+
+    @classmethod
     def IS_CHANGED(cls, source_file, load_cap=0, start_index=0, character_override="", manual_path="", folder="(all)"):
         p = Path(manual_path.strip()) if manual_path.strip() else _resolve(source_file)
         key = manual_path.strip() or source_file

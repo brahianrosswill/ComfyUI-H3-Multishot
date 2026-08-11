@@ -90,7 +90,7 @@ switch is lazy, so the branch you are not using never executes.
 |---|---|---|
 | `seed_per_shot` | `ON` | **Leave it on.** Measured: varying the seed per shot *holds* the face; using one seed for every shot drifted both face and voice. Identity lives in the conditioning, not the seed. |
 | `start_image` | unwired | An identity anchor image. Seeds shot 1 and anchors appearance. Optional — the frame relay plus verbatim descriptions usually suffice. |
-| `reference_images` | unwired | A batch of character portraits carried into **every** shot as `<Picture 1>`, `<Picture 2>`… Bind them in the prompt text. Needs a ref2va checkpoint. |
+| `reference_images` | **gate off** | A batch of character portraits carried into **every** shot as `<Picture 1>`, `<Picture 2>`… Bind them in the prompt text. Needs a ref2va checkpoint. Fed by the **REFERENCE** lane in the anchors column: two `LoadImage` nodes → `ImageBatch` → **REFERENCE gate**. Flip the gate on and point the loaders at your portraits; chain another `ImageBatch` for a third and fourth. Unlike `start_image` these are not a first frame — they do not constrain shot 1's composition, they only carry who the person is, and they are what covers shot 1 while the memory bank is still empty. |
 | `voice_ref` | unwired | A clean solo speech clip, carried into every shot as `<Audio 1>`, pinning the voice. |
 | `self_anchor_voice` | **`on`** (needs `ref2va`) | Shot 1's *own rendered voice* becomes the reference for every later shot — no file needed. Write shot 1 with a clean solo line. Needs a ref2va checkpoint; a wired `voice_ref` takes priority. Note it enlarges the activation pool on every shot after the first. |
 
