@@ -147,6 +147,37 @@ no Motion-Context → `continuity=first_frame`.
 
 ---
 
+## Fixed in v2.1.2
+
+All four of these are in the writer half of the pack
+(`ComfyUI_JoyAI_Echo_GGUF_Nodes`), so they only matter if you let the LLM write
+the shots. If you paste your own prompt list, nothing here changes for you.
+
+- **Every story came out 15 shots.** The system prompt ordered exactly 15 when
+  the brief didn't ask for a count, so the LLM never got to decide. It now
+  counts the story's beats and lands where the story lands — measured 4–7 on
+  ordinary briefs, ~7 when the brief gives no signal at all (7 chained shots is
+  about 65 s at 243 frames, just over the 1-minute mark that platforms pay on).
+  Ask for a count and you still get exactly that count.
+- **`short_story` mode did nothing.** The workflow's `system_prompt` widget held
+  a frozen copy of the long-story prompt, and a filled widget overrides the
+  per-mode file — so every mode ran the long prompt, and pack prompt updates
+  never reached anyone who loaded the shipped workflow. The widget now ships
+  empty and the dropdown works. **If you saved your own copy of the v2.0/v2.1
+  workflow, clear that widget by hand.**
+- **`short_story` is 1–3 shots** instead of always exactly 1 — one is still the
+  common case, but a second or third is allowed when there's a named reason for
+  it.
+- **A messy LLM answer no longer kills the render.** Three separate real-world
+  failures, all fixed: a markdown fence sharing a line with the JSON used to
+  destroy the payload; a reply truncated at the token ceiling now has its
+  complete shots salvaged and the partial tail dropped; and parsing sat *outside*
+  the retry loop, so one malformed answer ended the run even though a re-ask
+  usually fixes it. Order is now clean → parse → retry ×3 → salvage → fail, and
+  the final error points you at `passthrough` mode.
+
+---
+
 ## Fixed in v2.1.1
 
 - **`context_pin` + Motion-Context coexistence.** Both packs patched
