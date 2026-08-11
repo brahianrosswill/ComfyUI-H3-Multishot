@@ -135,6 +135,14 @@ recency slot, which is the *worst* configuration, and the node warns about it
 on chains past 4 shots. Keep `bank_pinned` at 1 and use
 `audio_tone_control=flatten` to level the residual drift.
 
+**Best-audio recipe (cut-grammar content):** `continuity=cut` +
+`bank_pinned=1, memory_frames=0` - a bank of exactly one slot, shot 1,
+forever. Every shot is then a fresh generation whose only audio reference is
+the original performance, and the measured drift is flat (−5% over 8 shots at
+both seeds tested, where the shipped seamless config lost 8–50%). The joins
+are cuts, not a continuous take - that is the trade. Identity and scene still
+hold; the pinned slot carries them.
+
 
 ---
 
