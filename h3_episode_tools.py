@@ -21,7 +21,7 @@ class H3EpisodeSplit:
     Accepts either the one-line JSON envelope {"prompts": [...]} (the LPFF
     entry format) or raw blocks separated by --- lines. `bindings` is
     prepended to block 1 only - reference-image identity lines like
-    "<Picture 1>, <Picture 2> are the same person (Zara)." belong with the
+    "<Picture 1>, <Picture 2> are the same person (Rae)." belong with the
     ref2va stage, never in the I2V chain.
     """
 
@@ -280,7 +280,7 @@ class H3AutoRefs:
                 "Explicit comma list of character folders - overrides the "
                 "prompt scan entirely when set."}),
             "overrides": ("STRING", {"default": "", "tooltip":
-                "Folder remaps, e.g. 'zara=zara_preflash' to swap a "
+                "Folder remaps, e.g. 'rae=rae_night' to swap a "
                 "character's ref set for specific scenes. Comma-separated."}),
             "on_no_match": (["error", "no_reference"], {"default": "error",
                 "tooltip": "error = stop the run when no character matches "
@@ -469,7 +469,7 @@ class H3RefBatch:
             lines.append(f"{char}/{os.path.basename(p)} -> <Picture {idx}>")
         for char in order:
             nums = [f"<Picture {i}>" for i in per_char[char]]
-            # variant folders (zara_preflash, madison-corrupted) are the SAME
+            # variant folders (rae_night, rae-wet) are the SAME
             # person - bind the base name, i.e. the first separator token
             disp = re.split(r"[-_]", char)[0].title()
             binds.append(f"{', '.join(nums)} "
@@ -509,21 +509,43 @@ class H3StudioControls:
             "steps": ("INT", {"default": 12, "min": 1, "max": 50}),
             "sampler_name": (_sampler_names_sc(), {"default": "euler"}),
             "scheduler": (_scheduler_names_sc(), {"default": "beta"}),
+        }, "optional": {
+            # NEW WIDGETS APPEND LAST, and new OUTPUTS append last too -
+            # inserting either above shifts every saved workflow.
+            "shot_count": ("INT", {
+                "default": 0, "min": 0, "max": 30,
+                "tooltip": "How many shots the scene is. 0 = one shot per "
+                           "prompt in the script (and lets the prompt writer "
+                           "decide). Wire this to BOTH the sampler's "
+                           "shot_count and the writer's num_shots so they "
+                           "cannot disagree."}),
+            "use_file_prompts": ("BOOLEAN", {
+                "default": False,
+                "label_on": "file / prompt set",
+                "label_off": "manual entry",
+                "tooltip": "Drives the prompt-source switch. OFF = type the "
+                           "scene yourself; ON = pull it from the prompt-set "
+                           "file or folder. Wire to an H3 Any Switch."}),
         }}
 
-    RETURN_TYPES = ("INT", "INT", "INT", "INT", "STRING", "STRING")
+    RETURN_TYPES = ("INT", "INT", "INT", "INT", "STRING", "STRING",
+                    "INT", "BOOLEAN")
     RETURN_NAMES = ("width", "height", "frames_per_shot", "steps",
-                    "sampler_name", "scheduler")
+                    "sampler_name", "scheduler",
+                    "shot_count", "use_file_prompts")
     FUNCTION = "emit"
     CATEGORY = "video/minimax"
 
     def emit(self, width, height, frames_per_shot, steps,
-             sampler_name, scheduler):
+             sampler_name, scheduler, shot_count=0,
+             use_file_prompts=False):
         print(f"[H3StudioControls] {width}x{height}, {frames_per_shot}f/shot, "
-              f"{steps} steps, {sampler_name}/{scheduler} -> both stages",
+              f"{steps} steps, {sampler_name}/{scheduler}, "
+              f"shots={'auto' if not shot_count else shot_count}, "
+              f"prompts={'file' if use_file_prompts else 'manual'}",
               flush=True)
         return (width, height, frames_per_shot, steps,
-                sampler_name, scheduler)
+                sampler_name, scheduler, shot_count, use_file_prompts)
 
 
 def _sampler_names_sc():

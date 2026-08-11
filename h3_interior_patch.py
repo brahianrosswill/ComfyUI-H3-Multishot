@@ -77,11 +77,53 @@ def _selftest(module, cls):
     return True, f"self-test passed ({len(frame_rows_probe)} stock positions reproduced)"
 
 
+def _motion_context_present():
+    """ComfyUI-H3-Motion-Context patches the SAME layout site and refuses to
+    stack on a foreign patch (its self-test compares against stock and sees
+    ours as a position mismatch). Its version is a superset - per-row
+    coordinates plus audio timeline placement - so when it is installed we
+    stand down and let it own the site. When it is absent we fill the gap,
+    which is the only reason this module still exists."""
+    import os
+    here = os.path.dirname(os.path.abspath(__file__))
+    # This file ships two ways: inside a pack folder (custom_nodes/<pack>/
+    # this.py - siblings live one level up) and loose (custom_nodes/this.py -
+    # siblings live right here). Guessing one level was the bug that made a
+    # loose install never detect Motion-Context, never stand down, and mask
+    # the collision on the dev machine while every packaged install hit it.
+    # Walk up to the custom_nodes directory instead of assuming a depth.
+    cn = here
+    while cn and os.path.basename(cn).lower() != "custom_nodes":
+        parent = os.path.dirname(cn)
+        if parent == cn:
+            cn = here                          # fell off the root - fall back
+            break
+        cn = parent
+    try:
+        for name in os.listdir(cn):
+            if "motion-context" in name.lower().replace("_", "-"):
+                return name
+    except Exception:
+        pass
+    return None
+
+
 def ensure_interior_keyframes(verbose=True):
     """Idempotent. Returns (ok, message)."""
     if _state["done"]:
         return _state["ok"], _state["msg"]
     _state["done"] = True
+
+    _mc = _motion_context_present()
+    if _mc:
+        _state["ok"] = True
+        _state["msg"] = (
+            f"standing down: {_mc} is installed and owns the keyframe layout "
+            f"patch (its version is a superset). Interior anchors come from "
+            f"that pack; first/last anchors work either way.")
+        if verbose:
+            logging.info("[H3Keyframes] " + _state["msg"])
+        return True, _state["msg"]
 
     try:
         import comfy.ldm.minimax.model as mm

@@ -14,7 +14,7 @@ Selection mirrors the JoyEcho RefPicker conventions:
 
 `character` (optional) narrows to `<refs_root>/<character>/` when that
 subfolder exists, else to filenames containing the string - both matching how
-RIFT reference folders are laid out.
+character reference folders are laid out.
 """
 import os
 import random

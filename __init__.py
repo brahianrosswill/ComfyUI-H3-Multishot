@@ -1,36 +1,49 @@
-from . import h3_gguf_arch  # noqa: F401  (teaches ComfyUI-GGUF minimax_h3 on import)
+"""MiniMax-H3 Multishot / Seamless Chain node pack.
+
+Every optional module is imported defensively. One module failing (a
+missing third-party dependency, a ComfyUI API change) must not take the
+whole pack down with it - otherwise every node vanishes from the menu at
+once and saved workflows open as a wall of red boxes.
+"""
+import logging
+
 from .h3_multishot_utils import (NODE_CLASS_MAPPINGS,
                                  NODE_DISPLAY_NAME_MAPPINGS)
-from .h3_keyframes import (NODE_CLASS_MAPPINGS as _KF_C,
-                           NODE_DISPLAY_NAME_MAPPINGS as _KF_N)
-from .h3_cartridge import (NODE_CLASS_MAPPINGS as _CT_C,
-                           NODE_DISPLAY_NAME_MAPPINGS as _CT_D)
-from .h3_ref_folder import (NODE_CLASS_MAPPINGS as _RF_C,
-                            NODE_DISPLAY_NAME_MAPPINGS as _RF_D)
-from .h3_advanced import (NODE_CLASS_MAPPINGS as _AD_C,
-                          NODE_DISPLAY_NAME_MAPPINGS as _AD_N)
-from .h3_lora_stack import (NODE_CLASS_MAPPINGS as _LS_C,
-                            NODE_DISPLAY_NAME_MAPPINGS as _LS_D)
-
-for _c, _n in ((_KF_C, _KF_N), (_AD_C, _AD_N)):
-    NODE_CLASS_MAPPINGS.update(_c)
-    NODE_DISPLAY_NAME_MAPPINGS.update(_n)
 
 __all__ = ["NODE_CLASS_MAPPINGS", "NODE_DISPLAY_NAME_MAPPINGS"]
 
-NODE_CLASS_MAPPINGS.update(_RF_C)
-NODE_DISPLAY_NAME_MAPPINGS.update(_RF_D)
-NODE_CLASS_MAPPINGS.update(_CT_C)
-NODE_DISPLAY_NAME_MAPPINGS.update(_CT_D)
-NODE_CLASS_MAPPINGS.update(_LS_C)
-NODE_DISPLAY_NAME_MAPPINGS.update(_LS_D)
 
-from .h3_episode_tools import (NODE_CLASS_MAPPINGS as _ET_C,
-                               NODE_DISPLAY_NAME_MAPPINGS as _ET_D)
-NODE_CLASS_MAPPINGS.update(_ET_C)
-NODE_DISPLAY_NAME_MAPPINGS.update(_ET_D)
+def _merge(modname):
+    try:
+        mod = __import__(f"{__name__}.{modname}", fromlist=["*"])
+    except Exception as e:                                # pragma: no cover
+        logging.warning("[H3-Multishot] %s not loaded (%s) - its nodes are "
+                        "unavailable; the rest of the pack still works",
+                        modname, e)
+        return
+    NODE_CLASS_MAPPINGS.update(getattr(mod, "NODE_CLASS_MAPPINGS", {}))
+    NODE_DISPLAY_NAME_MAPPINGS.update(
+        getattr(mod, "NODE_DISPLAY_NAME_MAPPINGS", {}))
 
-from .h3_avbank_probe import (NODE_CLASS_MAPPINGS as _AV_C,
-                              NODE_DISPLAY_NAME_MAPPINGS as _AV_D)
-NODE_CLASS_MAPPINGS.update(_AV_C)
-NODE_DISPLAY_NAME_MAPPINGS.update(_AV_D)
+
+for _m in ("h3_keyframes",       # keyframe anchors
+           "h3_cartridge",       # portable character cartridges
+           "h3_ref_folder",      # reference-folder picker
+           "h3_advanced",        # advanced sampling helpers
+           "h3_lora_stack",      # H3LoraStack
+           "h3_episode_tools",   # StudioControls / StudioSwitches / AnySwitch
+           "h3_avbank_probe",   # AV bank diagnostics
+           "rift_prompt_source",  # RiftPromptSource (txt briefs + json)
+           "rift_script_picker",  # RiftScriptPicker + speaker stash
+           "rift_writer_unload"):  # adds a free-VRAM switch to the writer
+    _merge(_m)
+
+# Teaches ComfyUI-GGUF the minimax_h3 architecture, in memory, at startup.
+# apply_gguf_arch_patch.py is the on-disk fallback for installs where this
+# import cannot reach ComfyUI-GGUF. Harmless when GGUF is not installed.
+try:
+    from . import h3_gguf_arch          # noqa: F401
+except Exception as _e:                                   # pragma: no cover
+    logging.info("[H3-Multishot] GGUF arch hook not installed (%s). "
+                 "Safetensors checkpoints are unaffected; for GGUF, install "
+                 "ComfyUI-GGUF and run apply_gguf_arch_patch.py once.", _e)

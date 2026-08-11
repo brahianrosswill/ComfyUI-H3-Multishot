@@ -1,336 +1,507 @@
 # ComfyUI-H3-Multishot
 
-Multishot video+audio generation for **MiniMax-H3** in ComfyUI: one script,
-N chained shots, one seam-clean master. Plus a dual-format model loader
-(safetensors + GGUF) and the GGUF architecture patch H3 needs.
+**Render a multi-shot MiniMax-H3 scene as one continuous take: no visible cuts, no colour shift between shots, unbroken audio.**
 
-**v1.5** - chained Hard Mode: one script where shot 1 renders from
-references (ref2va) and later shots chain I2V from its last frame, joined
-in-graph into one master with audio. Plus a 4-slot MODEL-only LoRA stack,
-an `activation_reserve_gb` override on the loader for 24 GB cards, and an
-experimental fix that lets references and keyframes coexist.
-See [Changelog](#changelog).
+MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-## Nodes
+Current release: **v2.0 - MiniMax-H3 Seamless Chain**.
 
-- **H3 Keyframes (any position)** - anchor images anywhere in the clip, not
-  just the first and last frame. Stock ComfyUI raises `only first/last keyframe
-  anchors are supported`; that is a positional-maths limit, not a model limit
-  (see the changelog). Six anchor slots plus an unbounded `images_batch`, each
-  positioned as a percentage (`0%, 50%, 100%`), an absolute frame index (`0, 121,
-  242`), or an inclusive range (`0-9, 352-361`). A descending range such as
-  `30%-20%` reverses that section of the batch.
-- **H3 Condition Strength** - how strongly keyframe/reference conditioning is
-  trusted. Exposes `minimax_visual_cond_noise_aug` and
-  `minimax_audio_cond_noise_aug`, which ComfyUI core reads but no stock node
-  writes, so they were pinned at their defaults.
-- **H3 Reference Audio (stereo guard)** - forces a reference clip to stereo
-  32 kHz. A **mono** reference crashes the sampler with an unhelpful shape
-  mismatch, because the layout reserves two channels and nothing in stock
-  converts them.
+- GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
+- Civitai: <https://civitai.com/models/2833322>
 
-- **H3 Multishot Sampler (one node)** - the whole pipeline: paste a script
-  (one prompt per shot, `---` between shots; JSON `{"prompts": [...]}` also
-  accepted), set `shot_count` (0 = one shot per prompt, 1-8 forces it), and
-  get master frames + master audio out. Each shot chains from the last frame
-  of the previous one; the duplicated seam frame and its 1/24s of audio are
-  trimmed automatically.
-  - **`start_image` (optional, v1.1)** - connect a `LoadImage` and shot 1
-    starts from that frame (image-to-video). Leave it unconnected for pure
-    text-to-video; behaviour is unchanged. Shot 1 keeps its first frame (no
-    seam trim), so the image you supply is the image you get.
-- **H3 Model Loader (safetensors + GGUF)** - one dropdown for both formats.
-  GGUF files route through ComfyUI-GGUF automatically.
-- **H3 CLIP Loader (safetensors + GGUF)** - the same treatment for text
-  encoders; GGUF encoders auto-pair their `-mmproj` vision sidecar so image
-  referencing keeps working.
-- **H3 Shot List** - the same script parser as separate STRING outputs, for
-  the expert graph.
-- **H3 Multishot Sampler + Memory (long form)** - for 2-5 minute videos
-  (12-30 shots) where plain chaining drifts. Stock chaining shows each shot ONE
-  image (the previous shot's last frame), so every hop can only see one hop
-  back and identity error compounds. This node splits the two jobs:
-  the **keyframe** stays the most recent frame (seams stay smooth), while the
-  **memory** shown to the encoder is a persistent **anchor** from the start of
-  the piece plus the last N shot-end frames. The anchor never changes, so drift
-  cannot compound. Knobs: `anchor_frames` (1 = on, the long-chain fix) and
-  `memory_frames` (recent frames, 0 = stock behaviour).
-- **H3 Optional Image (I2V on/off)** - a real toggle for an optional image
-  input. A normal switch node cannot express "no image" (both branches are
-  required), so turning I2V off usually ends up feeding a black placeholder
-  frame - which is not text-to-video, it is video that starts from black. This
-  node emits nothing when disabled.
-- **H3 Audio Trim Start** - trim N seconds from the front of an AUDIO clip
-  (seam-sync helper for hand-built chains).
+---
 
-## Install
 
-1. Clone into `custom_nodes/` (or install via ComfyUI-Manager > Install via
-   Git URL).
-2. For GGUF models, also install
-   [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF). Nothing else to do -
-   as of v1.5.2 this pack teaches it the `minimax_h3` architecture
-   automatically, in memory, every time ComfyUI starts.
-3. Restart ComfyUI, load `workflows/H3_Multishot_AIO.json`.
+### Nodes added in 2.1
 
-Requires ComfyUI **v0.30.0+** (native MiniMax H3 support).
+| Node | What it does |
+|---|---|
+| `RiftPromptSource` | One dropdown over LPFF-style `.txt` briefs and passthrough `.json` scripts. Emits `story_idea` / `character` / `count`. Reads `input/rift_prompts/`, and still reads the older `input/joyecho_prompts/` so existing folders keep working. |
+| `RiftScriptPicker` | JSON script dropdown, and the speaker/voice stash `RiftPromptSource` feeds. |
+| *(not a node)* `unload_model_after` | A switch **added to the LLM prompt writer** (`JoyEcho_LLMEnhance`). On, the writer frees its own model from Ollama once the script is written, so the video model gets the card. Uses the writer's existing `base_url` and `model_name` — nothing to keep in sync. Added in memory at startup by this pack, so the writer's own package is not modified; the switch simply appears on the node. Off by default. Ollama's OpenAI-compatible endpoint has no `keep_alive` field and its shim never sets one, so without this the model sits for the server default of five minutes — your whole first shot. |
 
-### Troubleshooting GGUF loading
+`JoyEcho_PromptSource` and `JoyEcho_ScriptPicker` still resolve as deprecated
+aliases, so graphs saved against 2.0 open unchanged. They were never published
+under those names — that was the 2.0 bug.
 
-**`Unexpected architecture type in GGUF file: 'minimax_h3'`**
-ComfyUI-GGUF checks a GGUF's architecture against a fixed list and rejects the
-file before reading any tensors; upstream's list has no `minimax_h3` entry. The
-quant is fine - the loader simply does not recognise it yet. This pack patches
-that list in memory at startup, so installing the pack is the whole fix. If you
-see this error anyway, the pack is not loaded (check the ComfyUI console for
-`[H3] taught ComfyUI-GGUF the 'minimax_h3' architecture`), or apply the on-disk
-fallback with `python apply_gguf_arch_patch.py` from this folder and restart.
+### The prompt writer needs a model you actually have
 
-**Text-encoder GGUF fails with a state_dict / vision mismatch**
-Load the H3 text encoder with this pack's **H3 Clip Loader (Any)**, not the
-stock `CLIPLoaderGGUF`. The H3 encoder is a *truncated* Qwen3-VL-32B (50 layers,
-no final norm, no lm_head) whose vision tower ships as a separate
-`-mmproj-*.gguf` sidecar. Stock ComfyUI-GGUF only merges an mmproj when the
-architecture is `qwen2vl`, and Qwen3-VL reports `qwen3vl`, so the sidecar is
-never merged - and its key map is qwen2vl-era anyway (wrong merger keys, no
-deepstack or split-QKV rules). This pack's loader does the truncation, the
-merge, and the vision-tensor renaming. Keep the `-mmproj` file in the same
-folder as the encoder and do not rename either: they are paired by filename.
+The full workflow points at a local Ollama with `model_name = qwen3:14b`.
+**Pull it before the first queue** or the run stops with
+`LLM API error 404: model 'qwen3:14b' not found`:
 
-A full `.safetensors` encoder (fp8, int8, NVFP4-AWQ, ...) needs none of this -
-it is a complete pre-shaped model, which is why those "just work" while the
-GGUF needs the pack's loader.
+```
+ollama pull qwen3:14b
+```
+
+Any OpenAI-compatible endpoint works — its URL in `base_url`, its exact tag in
+`model_name` (`ollama list` prints the tags you have). A remote endpoint is
+often better: a local writer large enough to be good competes with H3 for the
+same card and on under 32 GB will evict the model mid-render. When you do run
+local, turn on `unload_model_after` on the writer — it frees the model as soon
+as the script is written.
+
+No LLM at all? Set `use_file_prompts` to manual entry, delete the writer, and
+feed your own `---`-separated shot script into the sampler's `script` input.
+The CORE workflow already works this way.
+
+**Try a render with every switch off and the reserve at `0` before touching
+any of this.** The activation reserve measures each shape and conditioning
+payload as it renders and sizes the pool itself, and it holds on 24 GB cards
+as well as 32 GB. A hand-set reserve *overrides* that measurement. These
+switches are for digging out of a spill the console has already named.
+
+## Quick start
+
+Five steps to a rendering chain. This path uses the **CORE** workflow, which needs nothing except this pack and ComfyUI built-ins.
+
+**1. Install the node pack**
+
+```bash
+cd ComfyUI/custom_nodes
+git clone https://github.com/jlucasmcrell/ComfyUI-H3-Multishot
+```
+
+Or in ComfyUI-Manager: *Install via Git URL*. Requires **ComfyUI v0.30.0+** (native MiniMax-H3 support).
+
+**2. Put the models in place**
+
+```
+ComfyUI/models/diffusion_models/   <- MiniMax-H3 ref2va checkpoint (safetensors or GGUF)
+ComfyUI/models/text_encoders/      <- H3 text encoder (+ its -mmproj sidecar if GGUF)
+ComfyUI/models/vae/                <- video VAE + audio VAE
+```
+
+Download links are in [Models](#models).
+
+**3. Restart ComfyUI and load the workflow**
+
+```
+MiniMax-H3_Seamless_Chain_v2.0.zip
+ComfyUI-H3-Multishot/LICENSE
+ComfyUI-H3-Multishot/README.md
+ComfyUI-H3-Multishot/__init__.py               defensive loader
+ComfyUI-H3-Multishot/apply_gguf_arch_patch.py  on-disk GGUF arch fallback
+ComfyUI-H3-Multishot/h3_advanced.py            advanced sampling helpers
+ComfyUI-H3-Multishot/h3_avbank_probe.py        AV bank diagnostics
+ComfyUI-H3-Multishot/h3_cartridge.py           portable character cartridges
+ComfyUI-H3-Multishot/h3_episode_tools.py       StudioControls, StudioSwitches, AnySwitch
+ComfyUI-H3-Multishot/h3_gguf_arch.py           teaches ComfyUI-GGUF the minimax_h3 arch
+ComfyUI-H3-Multishot/h3_interior_patch.py      interior anchors (stands down for Motion Context)
+ComfyUI-H3-Multishot/h3_keyframes.py           keyframe anchor nodes
+ComfyUI-H3-Multishot/h3_lora_stack.py          H3LoraStack
+ComfyUI-H3-Multishot/h3_multishot_utils.py     samplers, loaders, gates
+ComfyUI-H3-Multishot/h3_ref_folder.py          reference-folder picker
+INSTALL.md
+PROMPTING.md
+SETTINGS.md
+example_script.txt                             worked four-shot two-hander
+workflows/H3_Keyframes.json                    single-clip keyframe anchoring
+workflows/H3_Seamless_Chain_CORE.json          same job, zero third-party packs
+workflows/H3_Seamless_Chain_v2.json            everything, optional lanes gated off
+```
+
+**4. Fill in the two panels**
+
+- **MASTER CONTROLS** - resolution, frames per shot, steps. The shipped values (`1280x736`, `362`, `14`) are the verified recipe; leave them alone for your first render.
+- **Script** - one prompt per shot, `---` between shots. Read [Prompting and boundary rules](#prompting-and-boundary-rules) before you write it; the join rules are the difference between a seamless take and a chain with clipped words at every seam.
+
+**5. Queue**
+
+`preview_first_shot` is ON by default, so shot 1 surfaces as soon as it is done and you can judge framing and voice before the rest of the chain commits. Output lands in:
+
+```
+
+**Three workflows, one reason each.** `v2` is everything with the optional
+lanes gated off. `CORE` does the same job with zero third-party packs — start
+there if you want a render before installing anything else. `Keyframes` is a
+different job: a hand-built sampling graph for anchoring a single clip at
+chosen frame positions with per-anchor condition strength, not multishot.
+
+`H3_Multishot_AIO` and `H3_Multishot_MEMORY` from earlier versions are retired
+— every lane they had is in v2 (the AIO's episode source, plate chain and audio
+spine were folded in; MEMORY had nothing v2 lacks). Existing copies keep
+working.
+
+output/video/H3CHAIN/
+```
+
+as a 24fps video with a paired audio file.
+
+**Then, for the FULL workflow** (`H3_Seamless_Chain_v2.json`), install the packs
+it needs — ComfyUI validates **every** node class in a graph before it will
+queue, so a missing pack stops the whole workflow, not just its own feature:
+
+| Pack | Needed for |
+| --- | --- |
+| `ComfyUI_JoyAI_Echo_GGUF_Nodes` | the LLM prompt writer — **ships in this repo's release zip**, modified with attribution (see its NOTICE). Use that copy, not upstream: the workflow drives inputs upstream does not have. |
+| [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) | `continuity=context_pin`, the shipped default |
+| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | the `beta57` scheduler the full workflow ships with |
+| ComfyUI-sol-attn + comfyui-minimax-h3-blockcache-T8 | the VRAM/SPEED patch switches |
+| [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) | the on-canvas script preview |
+
+Every one of them can be removed instead — `INSTALL.md` in the zip gives the
+one-widget change or node deletion for each. Highlights: no RES4LYF → set
+`scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
+no Motion-Context → `continuity=first_frame`.
+
+---
+
+## Fixed in v2.1.1
+
+- **`context_pin` + Motion-Context coexistence.** Both packs patched
+  `MiniMaxH3.extra_conds` and Motion-Context refuses to stack on an unknown
+  wrapper, so with both installed `context_pin` errored out. This pack's
+  wrapper is now a superset of theirs and declares their compatibility marker
+  (`_h3_motion_context_payload_patch`), so whichever loads first owns the site
+  and the other stands down. Load order no longer matters.
+- **`seamless_tail` fails fast.** It needs interior keyframe anchors, which
+  conflict with Motion-Context; it used to crash *mid-chain* after shot 1 had
+  already rendered. It now stops before any sampling with the alternatives
+  named (`context_pin`, `first_frame`, or remove that pack).
+- **`seamless` is labeled the legacy soft pin it is.** Latent-only, no vision
+  tokens, often still reads as a cut. Use `context_pin` or `first_frame` for a
+  real join.
+- The dev-machine blind spot that hid the first two (an install-layout bug in
+  the conflict detection) is fixed, and releases are now tested on a packaged
+  clean install.
+
+## What is new in v2.0
+
+- **A complete single-purpose workflow.** `H3_Seamless_Chain_v2.json` - 42 nodes in 9 grouped lanes with 8 on-canvas notes - built for one job instead of exposing every knob in the pack. `H3_Seamless_Chain_CORE.json` is the same graph with every third-party node removed.
+- **MASTER CONTROLS panel** (`H3StudioControls`). One node drives resolution, frames per shot and steps for the sampler *and* for the prompt writer's dialogue pacing, so the writer's line lengths stay inside the shot length you actually set.
+- **VRAM/SPEED panel** (`H3StudioSwitches` plus a reserve control). Three lazily gated model patches: memory-efficient attention, chunked feed-forward, block cache. **All OFF by default reproduces the verified recipe exactly**, and the gates are lazy, so an OFF patch never executes.
+- **Energy-aware seam audio ("smart weld").** The boundary audio cut now lands in the quietest gap inside the incoming shot's first 0.75s rather than blindly at sample 0. A word placed at a shot head is no longer clipped.
+- **Rewritten activation-reserve heuristic.** Cache keys now include a conditioning-*payload* signature (keyframes, audio references, two-pass), so a bare shot 1 and a reference-laden shot 2 get their own memory measurements instead of sharing one. Measured pools are no longer overridden by a fixed floor, a first run of a new payload variant estimates from a measured sibling, and **a VRAM spill into system RAM is now detected and named in the console** - previously it presented only as an unexplained ~5x slowdown.
+- **`join_style` on the prompt writer.** Appends the render-verified boundary rules to the system prompt so generated scripts obey them automatically.
+- **`flf_chain` fails loudly.** Selecting it with no boundary plates raises a clear error instead of silently rendering an unanchored chain.
+
+---
+
+## Requirements
+
+### Required
+
+| Component | Version | Why |
+| --- | --- | --- |
+| ComfyUI | **v0.30.0+** | Native MiniMax-H3 support. Older builds do not have the model. |
+| This pack | v2.0 | Samplers, loaders, studio controls, gates. |
+| MiniMax-H3 checkpoint (`ref2va` shipped, `fl2va` also works) | - | The generator. See [Models](#models). |
+| H3 text encoder + video VAE + audio VAE | - | See [Models](#models). |
+
+The **CORE** workflow needs nothing beyond the above. It is built entirely from this pack plus ComfyUI built-ins (`LoadImage`, `LoadAudio`, `SaveVideo`, `SaveAudio`, `CreateVideo`, `VAELoader`, `PrimitiveFloat`, `Note`).
+
+### Full workflow
+
+These serve the **FULL** workflow. A missing one does not degrade a single
+feature — ComfyUI refuses to queue a graph containing any unknown node class,
+so the workflow will not run until the pack is installed **or its nodes are
+removed** (each has a documented removal, see `INSTALL.md`).
+
+| Pack | Author | Unlocks | Needed when |
+| --- | --- | --- | --- |
+| [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context) | NikoDemon80 | `continuity=context_pin`, the raw-latent join (the shipped default) | Remove by setting `continuity=first_frame`. |
+| [RES4LYF](https://github.com/ClownsharkBatwing/RES4LYF) | ClownsharkBatwing | the `beta57` scheduler | Remove by setting `scheduler=beta` (CORE ships `beta` already). |
+| ComfyUI_JoyAI_Echo_GGUF_Nodes (`JoyEcho_LLMEnhance`) | RealRebelAI (modified copy in the release zip) | The automatic prompt-writing lane | Use the zip's copy. Hand-written scripts can delete the writer instead. |
+| [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) | pythongosssss | `ShowText` script preview on canvas | You want to read the generated script in the graph. |
+| ComfyUI-sol-attn | sol-attn | Memory-efficient attention, chunked feed-forward | Only if you enable those two VRAM/SPEED switches. |
+| comfyui-minimax-h3-blockcache-T8 | T8 | Block cache | Only if you enable that VRAM/SPEED switch. |
+| [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF) | city96 | GGUF checkpoints and encoders | Only if you run quantised models. |
+
+**GGUF users:** install ComfyUI-GGUF, then run the arch patch once:
+
+```bash
+cd ComfyUI/custom_nodes/ComfyUI-H3-Multishot
+python apply_gguf_arch_patch.py
+```
+
+This teaches ComfyUI-GGUF the `minimax_h3` architecture. See [Troubleshooting](#troubleshooting) if you still get an architecture error.
+
+---
 
 ## Models
 
-GGUF quants (Q5_1 for 24-32GB cards, Q4_0 for 16GB):
-[**joeygambino/MiniMax-H3-GGUF**](https://huggingface.co/joeygambino/MiniMax-H3-GGUF) - the card there also
-documents why K-quants (Q6_K etc.) are impossible for this architecture.
-Workflows also live on HF: [MiniMax-H3-Multishot-Workflow](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow).
-Text encoder GGUF + **the required mmproj vision sidecar**:
-[**joeygambino/MiniMax-H3-encoder-GGUF**](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF).
-The mmproj is not optional if you use reference images **or more than one
-shot** - shot chaining feeds the previous shot's last frame through the
-encoder's vision path.
+**Diffusion checkpoint (required).** MiniMax-H3. The workflows ship on **`ref2va`**; **`fl2va`** chains equally well and is lighter — see [Which checkpoint](#which-checkpoint). Either way it is the checkpoint's *trained continuation task* that makes the joins work.
 
-Full-precision text encoder + VAEs: [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3).
+### Which checkpoint
 
-## Workflows
+Both H3 variants chain, and they differ in what else they can carry.
 
-- `H3_Multishot_AIO.json` - easy mode: loaders > script > one sampler > save.
-  Ships with a `LoadImage` -> **H3 Optional Image** -> `start_image` chain, so
-  the same graph does T2V and I2V: flip the toggle on to use your frame.
-- `H3_Multishot_MEMORY.json` - long-form mode: the memory sampler with an
-  identity anchor, for 2-5 minute multi-shot pieces.
-- `H3_Keyframes.json` - **keyframes anywhere**, single pass. One generation,
-  so the audio is one continuous stream with no seams.
+- **`ref2va` — the shipped default.** Carries *reference rows*, which is the
+  mechanism behind voice anchoring (`voice_ref`, `self_anchor_voice`) and the
+  identity bank. Reference tokens ride through every sampling step, so it is
+  somewhat slower and wants a little more headroom.
+- **`fl2va`.** The first/last-frame variant. Lighter and faster, no reference
+  rows — so voice anchoring and the bank do nothing on it, and turning them on
+  only costs tokens. It chains just as well; the voice rides the frame relay
+  and the join's audio reference instead of being explicitly pinned.
 
-## Sample
+**Blind review passed on the `fl2va` configuration.** `ref2va` ships as the
+default because it makes voice and character identity explicit rather than
+emergent. To take the reviewed path: set the checkpoint to `fl2va` and turn
+`self_anchor_voice` off.
 
-[`samples/H3_multishot_presenter_demo.mp4`](samples/H3_multishot_presenter_demo.mp4) -
-30s, three chained shots from one script on the Q5_1 GGUF: identity and voice
-held across both seams. This video was made BY the workflow it demonstrates.
 
-## Notes
 
-- `frames_per_shot` sits on H3's 17k+5 frame grid (243 = ~10.1s at 24fps;
-  362 = ~15.1s, the trained max - beyond is untested but functional).
-- Malformed JSON scripts fail loudly instead of rendering the raw text.
-- **Resolution:** H3 is happiest at its native size. Rendering natively at
-  1920x1088 measured *worse* than 960x544 in blind review (softer detail, and
-  it reads as an upscale) while costing ~4x the time. Render native, then
-  upscale in pixel space.
-- Roadmap: ref2va reference conditioning (identity images + voice clips) and a
-  deeper multi-frame memory for long-form chains, in a hard-mode sampler.
+GGUF quants: <https://huggingface.co/joeygambino/MiniMax-H3-GGUF>
 
-## Changelog
+| Quant | Card size it targets |
+| --- | --- |
+| `Q8_0` | 32GB |
+| `Q5_1` | 24-32GB |
+| `Q4_0` | 16GB |
 
-### v1.5.2
+The `curve` variants on that repo are pruned-form requants of the same weights.
 
-- **GGUF loading now works out of the box.** The pack teaches ComfyUI-GGUF the
-  `minimax_h3` architecture in memory at startup, so the DiT quants load with
-  no manual step and nothing written to disk. This replaces the one-time
-  `apply_gguf_arch_patch.py` step, which is kept only as a fallback. Reported
-  independently by three users as "Unexpected architecture type in GGUF file:
-  'minimax_h3'" and as "all the GGUFs error" - it was never the quants, it was
-  a footnote in the install instructions.
-- Because the patch is in memory, it survives ComfyUI-GGUF updates instead of
-  being reverted by them.
-- README: added a GGUF troubleshooting section covering that error and the
-  text-encoder / `-mmproj` sidecar pairing (use **H3 Clip Loader (Any)**, not
-  the stock `CLIPLoaderGGUF`).
+**Text encoder and VAEs (required).** <https://huggingface.co/Comfy-Org/MiniMax-H3>
 
-### v1.5
+If you use a **GGUF text encoder** it needs its `-mmproj-*.gguf` vision sidecar — that path is what carries frames between shots. Load it with this pack's **H3 CLIP Loader (safetensors + GGUF)**, not the stock `CLIPLoaderGGUF`. Encoder quants: <https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF>
 
-- **Chained Hard Mode** (`workflows/H3_HardMode_Chained.json` + the Hard Mode
-  release page): `H3EpisodeSplit` splits a `---` script into shot 1 (with your
-  `<Picture N>` bindings) and the rest; shot 1 renders ref2va, `H3LastFrame`
-  hands its final frame to the multishot sampler as `start_image`, and
-  `H3ConcatAV` joins both segments into one master with audio.
-- **`H3LoraStack`** - four MODEL-only LoRA slots (no CLIP input; H3's encoder
-  is not a CLIP), `None`-inert, for e.g. 4-step turbo distills.
-- **`activation_reserve_gb`** on `H3ModelLoaderAny` - override ComfyUI's very
-  conservative inference-memory estimate (at 736x1344x362f it reserves ~20 GB
-  and streams every weight from RAM on a 24 GB card). Set a measured value
-  (~6 GB) to reclaim the difference for resident weights. Survives LoRA
-  stacks cloning the patcher.
-- **Experimental: references + keyframes can coexist** - core ComfyUI drops
-  keyframe latents when references are present (an overwrite where an append
-  belongs), which is the real cause of the long-standing "no refs + start
-  frame" limitation. The pack now merges them in the correct packed order,
-  and `H3KeyframeInject` adds a start-frame keyframe to ref2va conditioning.
-  Measured: the ref2va checkpoint follows the keyframe's subjects and staging
-  but holds it match-cut tight, not pixel tight - treat chains built this way
-  as cuts, not continuous takes.
-- Auto-reference helpers (`H3AutoRefs`, `H3RefBatch`): pick per-character
-  reference sets from folders by scanning the prompt's prose (dialogue
-  stripped), and generate the `<Picture N>` binding lines automatically.
+ComfyUI-GGUF pairs the sidecar by **filename**, scanning only the encoder's own folder for a `.gguf` containing both `mmproj` and the encoder's stem. Rename either file, or split them across folders, and the match fails — upstream then logs an error and continues *without* the vision tower, which presents as the model ignoring your reference image. This pack's loader never does that:
 
-### v1.4
+- it **raises** rather than continuing blind;
+- if the name match fails but exactly one mmproj sits beside the encoder, it uses that one and says so;
+- and the `mmproj_name` widget lets you point straight at any sidecar, after which **names and folders stop mattering**.
 
-- **`sampler_name` and `scheduler` are widgets on both multishot samplers.**
-  They were hardcoded to `res_multistep` / `simple` internally; those are now
-  the defaults, so an existing workflow renders exactly what it rendered
-  before. The option lists come from `comfy.samplers.KSampler` at call time
-  (44 samplers, 9 schedulers on current ComfyUI) rather than a copy that can
-  go stale.
+**ref2va (optional).** Only needed for the reference/bank workflows. Seamless chaining does not use it.
 
-  The new widgets sit at the END of the optional inputs on purpose: ComfyUI
-  serialises widget values positionally, so inserting them earlier would
-  silently re-map the saved settings of every existing workflow.
+---
 
-- **Bundled workflows relabelled.** Every node in the three graphs now carries
-  a descriptive title (the two bare `VAELoader`s are "Video VAE" / "Audio VAE",
-  the reference slots state their `<Picture n>` binding, and the long-form
-  graph's read-me note no longer sits on top of the model loaders).
+## How the chaining works
 
-### v1.3
+H3 renders a block. Two blocks placed end to end normally read as a cut: the second block re-imagines the scene from text, so faces, wardrobe, framing and colour all shift at the boundary. Both mechanisms below attack that by carrying real rendered state across the join instead of re-describing it.
 
-- **Keyframe positions take percentages and ranges.** Contributed by
-  [@viralesveras](https://github.com/viralesveras) in
-  [#4](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot/pull/4). Previously a
-  bare `1` meant *the last frame*, not frame 1, so addressing an early frame
-  absolutely required writing `1.0001` - which is how the ambiguity was found.
+### 1. `first_frame` - the frame relay
 
-      0%, 50%, 100%     percentages
-      0, 121, 242       absolute frame indices
-      0-9, 352-361      inclusive ranges
-      30%-20%           descending: reverses that section of the batch
+Classic `H3MultishotSampler`. No third-party dependency.
 
-  **Existing workflows keep working.** A bare non-integer at or below 1.0 is
-  unambiguous - nobody means "frame index 0.5" - so a plain list containing one
-  is read the old way and logs the percentage spelling to switch to. An
-  all-integer `0, 1` is genuinely ambiguous, so it takes the new absolute meaning
-  and warns rather than silently anchoring a different frame.
-- **`images_batch` on the keyframe node.** Also from @viralesveras, in
-  [#2](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot/pull/2), for when six
-  slots is not enough - several frames at each end to pin complex motion, or a
-  set of frames kept from a source video. It **adds to** the six individual
-  slots; as originally merged it replaced them, which silently dropped `image_1`.
-- **Loaders find GGUFs in subfolders.** Both model loaders scanned only the top
-  level of `diffusion_models` / `text_encoders`, so a file under `gguf/` was
-  invisible in the dropdown while ComfyUI-GGUF's own loader listed it fine. The
-  scan exists because `.gguf` is not in `supported_pt_extensions`; it simply was
-  not recursive.
+Each shot's **last frame** is handed to the next shot as its **first frame**, through fl2va's *trained continuation task* - the same conditioning path the checkpoint was trained on for image-to-video, not a bolted-on hack. Because the next shot is generated *from* that picture rather than from a fresh reading of the prompt, the pixels at the boundary are continuous by construction: same face, same wardrobe, same lighting, same colour balance.
 
-### v1.2
+Two cleanups make the join invisible:
 
-- **Keyframes at any position.** Stock ComfyUI pins H3 keyframes to frame 0 and
-  frame N-1 and raises `only first/last keyframe anchors are supported` for
-  anything else. Both stock cases are actually the same expression, because
-  `sum(_video_t_spans(latent_t)) == FRAME_RESCALE * frame_count`:
+- The **duplicated boundary frame** is trimmed. Shot N's last frame and shot N+1's first frame are the same picture; leaving both in produces a one-frame stutter.
+- The **seam audio** gets a **40ms equal-power weld**. Equal-power (rather than linear) crossfade keeps perceived loudness constant through the overlap, so the join does not dip.
 
-  ```
-  cond_t = text_len + FRAME_RESCALE * pixel_index
-  ```
+### 2. `context_pin` - the raw-latent pin
 
-  which is defined for every frame, not just the two endpoints.
+`H3MultishotMemorySampler` with `continuity=context_pin`. Requires ComfyUI-H3-Motion-Context.
 
-  Measured on an RTX 5090, 243 frames, one anchor at pixel frame 121: the
-  rendered frame most resembling the anchor image was frame **122** - the
-  requested position, off by one - reached by continuous motion with no cut
-  (peak frame-to-frame change 2.3x median), audio unbroken through it.
+Instead of one frame, the previous shot's **last 22 frames** ride into the next shot **as raw latents** - bit-identical, with no VAE round trip - placed at *interior keyframe coordinates*, alongside a timeline-placed audio reference.
 
-  The patch is applied **in memory**; it does not edit any ComfyUI file. It
-  self-tests against the stock formula before committing and rolls itself back
-  if first/last positions do not reproduce exactly, so a future ComfyUI change
-  degrades to "interior anchors unavailable" rather than to broken renders.
+Why this is stronger than the frame relay:
 
-  **Move vs cut.** Anchor images with a plausible camera path between them
-  (same place, different angle) make H3 interpolate. Images with no possible
-  path (a kitchen and a diner) make it **cut**, then hold - stock first/last
-  does exactly the same with such a pair, so that is the model being sensible,
-  not a defect. The cut case has its own use: a timed shot change inside ONE
-  generation, which keeps the audio continuous across it.
+- **No VAE round trip.** A decoded-and-re-encoded frame is not the frame the model produced; the codec loss at exactly the boundary is where colour and micro-texture drift enters. Passing latents keeps the handoff bit-identical.
+- **22 frames of motion, not one still.** A single frame tells the model where things *are*. Twenty-two frames tell it where things are *going* - velocity, gesture direction, head turn, camera drift - so motion carries through the join instead of restarting from rest.
+- **Interior coordinates.** The pinned latents sit inside the new shot's timeline rather than only at frame 0, so the model regenerates *through* the shared window and matches it, rather than departing from it.
 
-- **Reference-to-video groundwork.** The stereo guard and strength control
-  below are what reference workflows need. The hard-mode graph itself is
-  built but has not been rendered yet, so it is not in this release.
+The regenerated **0.92s head** (22 frames at 24fps) overlaps material you already have, so it is trimmed on decode. This is why the first second of every chained shot is discarded replay - see the boundary rules.
 
-  **References and keyframes cannot coexist.** This is core behaviour, not a
-  choice here: `model_base.py` *assigns* `cond_video_latents` for refs,
-  discarding keyframe latents while the keyframe layout rows survive, and the
-  packed sequence then desyncs into a shape-mismatch crash. Pick one per shot.
+### Which one to use
 
-  Reference tags are **1-based** in the prompt (`<Picture 1>`) while the input
-  slots are **0-based** (`ref_image_0`). A reference video *with* a soundtrack
-  also consumes an `<Audio j>` ordinal before your standalone clips.
+`context_pin` is the shipped default and the tighter join. `first_frame` is the zero-dependency path and is verified across multi-shot chains in its own right. Both are real seamless mechanisms; the choice is dependency tolerance versus join tightness.
 
-- **H3 Reference Audio (stereo guard).** Mono reference audio produced half the
-  rows the layout reserved and died deep inside the model. Now handled.
+---
 
-- **H3 Condition Strength.** `minimax_visual_cond_noise_aug` /
-  `minimax_audio_cond_noise_aug` are read by core and written by nothing, so
-  they sat at 0.999 / 1.0 forever. They blend noise into conditioning latents
-  and set the timestep the condition rows occupy - an anchor-strength dial.
+## Identity without reference images
 
-### v1.1
-- **Image-to-video.** New optional `start_image` input on the Multishot
-  Sampler. Shot 1 uses it as its keyframe, the same way later shots use the
-  previous shot's last frame. Unconnected = unchanged T2V behaviour, so
-  existing graphs keep working.
-- **VRAM fix: the text encoder is now evicted before sampling.** The Qwen3-VL
-  encoder (~16.5GB even at Q4) and the H3 DiT (~25GB) do not co-fit on a 32GB
-  card. Previously the DiT loaded *partially* and streamed ~19GB from system
-  RAM on every step:
+Most chaining approaches hold a character by feeding reference images into every shot. This pack does not need them, and that is the point: **a 40-second two-character scene was rendered with zero reference images supplied**, and both characters held.
 
-  ```
-  loaded partially; 6423 MB usable, 5847 MB loaded, 19363 MB offloaded
-  ```
+Two stacked mechanisms do it:
 
-  Conditioning is already computed before sampling starts, so the encoder is
-  safe to evict there. Measured on an RTX 5090: **~60 min -> ~15 min** for the
-  same render. The node prints `[H3Multishot] TE evicted; NN.N GB free for the
-  DiT` each shot so you can confirm it. The encoder reloads per shot (a few
-  seconds) because chained prompts need it again - far cheaper than streaming.
-- **Long-form memory sampler (new node).** `H3 Multishot Sampler + Memory`
-  adds a persistent identity anchor plus rolling recent-frame memory, aimed at
-  12-30 shot (2-5 minute) chains where single-frame chaining drifts.
-- **H3 Optional Image (new node).** A genuine on/off for optional image inputs;
-  emits nothing when disabled instead of a placeholder frame.
-- **Script parser now self-repairs.** Long JSON scripts that lose their closing
-  brace/bracket, end on a trailing comma, or have an unterminated string are
-  auto-closed with a console warning instead of failing the render. Genuinely
-  malformed scripts still fail loudly.
-- Docs: linked the encoder GGUF repo and spelled out that **mmproj is required
-  for multi-shot**, not just for reference images.
+1. **The frame relay pins the instance.** Every shot after the first begins from an *actual rendered picture* of the character. The face and wardrobe propagate as pixels, not as a text description the model re-interprets. There is nothing to re-imagine, because the starting state is already correct.
+2. **Byte-identical text pins the category.** The prompt writer repeats each character's appearance block **verbatim** in every shot - same words, same order, no paraphrase. Sampling noise around a slightly reworded description is exactly how a face drifts between shots; identical tokens remove that degree of freedom.
 
-### v1.0
-- Initial release: multishot sampler, dual-format model/CLIP loaders, shot
-  list, audio trim, GGUF arch patch, AIO + 3-chain expert workflows.
+Frame pins the instance, text pins the category. Neither is sufficient alone: the relay without stable text lets the model gradually re-interpret the person over many hops, and stable text without the relay just gives you a well-described stranger every shot.
+
+This is also why `seed_per_shot` should stay ON - see the settings table.
+
+---
+
+## Settings reference
+
+### MASTER CONTROLS (`H3StudioControls`)
+
+| Setting | Shipped | Notes |
+| --- | --- | --- |
+| Resolution | `1280x736` | Drives the sampler and is reported to the prompt writer. |
+| Frames per shot | `362` | ~10.1s at 24fps. Sits on H3's frame grid. Also sets the writer's dialogue budget. |
+| Steps | `14` | Part of the verified recipe. |
+
+### Sampler dials
+
+| Dial | Shipped | What it does |
+| --- | --- | --- |
+| `shot_count` | `0` | `0` = one shot per prompt block in the script. A number forces that many shots. |
+| `seed_per_shot` | `ON` | Derives a distinct seed per shot. **Leave this ON.** Measured: per-shot seeds *hold* the face; reusing one seed for every shot drifted both face and voice. |
+| `continuity` | `context_pin` | `first_frame` (no deps), `context_pin` (needs Motion-Context), `flf_chain` (hard boundary-plate mode; requires plates, and raises an error without them). `seamless`/`seamless_tail` are legacy comparison modes: `seamless` is a soft latent-only pin that often reads as a cut; `seamless_tail` conflicts with Motion-Context and stops up front when that pack is installed. |
+| `chain_gain_control` | - | Set to `flatten` on chains past about 5 shots. Seam texture ratchets roughly 1.3x per join - each shot sharpens the one after it - and `flatten` stops the compounding. |
+| `color_level` | `off` | `off` / `mvgd` / `scene`. Levels each shot's colour and exposure statistics to shot 1's *settled tail* - a fixed reference, because matching each shot to its neighbour re-accumulates drift. Not needed when chaining by latents; reach for it if a long chain drifts warm or cool. |
+| `self_anchor_voice` | - | Feeds shot 1's own rendered audio forward as the voice reference for later shots, so the voice identity established in shot 1 is what later shots match. |
+| `voice_ref` | - | An external audio clip used as the voice reference instead. |
+| `two_pass_upscale` | `OFF` | Enables the two-pass upscale path. **Not combinable with `continuity = context_pin` or `latent_handoff`, or with an audio spine** - those carry the previous shot's raw latents, or one locked denoise trajectory, across the join and a two-pass render preserves neither; the node errors instead of weakening the join. Available on `cut`, `seamless`, `seamless_tail`, `first_frame`, `flf_chain`. |
+| `upscale_factor` | - | Upscale multiplier for pass 2. |
+| `pass1_fraction` | `0.4` | Fraction of the step schedule spent in pass 1. **0.4 is the verified value.** Past roughly 0.5 a ghost/moire lattice appears in the output. |
+| `upscale_audio_denoise` | - | Denoise applied on the audio lane during the upscale pass. |
+| `reference_image_size` | - | `match` (use the render resolution) or `max`. |
+| `preview_first_shot` | `ON` | Surfaces shot 1 as soon as it finishes so you can check framing and voice before the rest of the chain renders. |
+
+### VRAM/SPEED switches (`H3StudioSwitches`)
+
+| Switch | Shipped | Requires |
+| --- | --- | --- |
+| Memory-efficient attention | `OFF` | ComfyUI-sol-attn |
+| Chunked feed-forward | `OFF` | ComfyUI-sol-attn |
+| Block cache | `OFF` | comfyui-minimax-h3-blockcache-T8 |
+
+All three OFF reproduces the verified recipe exactly. The gates are lazy — an OFF patch never *executes* — but the patch nodes must still *exist* for the graph to validate, so the packs are required (or delete the three patch nodes and their gates). There is also an activation-reserve control here for overriding ComfyUI's inference-memory estimate.
+
+### Shipped workflow defaults
+
+```
+1280x736  |  362 frames/shot  |  14 steps  |  euler + beta57 (full; RES4LYF) / beta (CORE, stock)
+continuity = context_pin      |  ref2va checkpoint   |  bank ON
+all VRAM switches OFF         |  preview_first_shot ON
+24fps mux -> output/video/H3CHAIN/  (+ paired audio file)
+```
+
+---
+
+## Prompting and boundary rules
+
+These are render-verified. The FULL workflow's prompt writer applies them automatically via `join_style`; **hand-written scripts must follow them manually.** Ignoring them is the most common cause of a chain that looks seamless but sounds wrong.
+
+- **AIRLOCK.** Every shot after the first **opens holding the previous shot's exact closing arrangement**, with about two quiet seconds before anyone speaks. Quiet means real micro-motion - a breath, a weight shift - not a freeze.
+- **The first ~1 second of every chained shot is discarded replay.** Dialogue placed at frame 0 loses its opening syllables. This is not a bug to work around; it is the overlap window that makes the join seamless.
+- **LAND SETTLED.** End each shot back in a stable arrangement, dialogue finished, with about two seconds spare.
+- **A spoken line never straddles two shots.** Budget: *dialogue + 4 seconds of quiet must fit the shot length.* At 243 frames one long line fits. At 124 frames it does not.
+- **Repeat verbatim.** Each character's appearance description **and** the room/lighting description are repeated word-for-word in every shot. See [Identity without reference images](#identity-without-reference-images).
+- **Keep fps at 24.** Other frame rates audibly shift voice accents.
+
+Script format: one prompt per shot, `---` between shots. JSON (`{"prompts": [...]}`) is also accepted.
+
+---
+
+## Files in the release zip
+
+```
+MiniMax-H3_Seamless_Chain_v2.0.zip
+  ComfyUI-H3-Multishot/__init__.py
+  ComfyUI-H3-Multishot/h3_multishot_utils.py    (samplers, loaders, gates)
+  ComfyUI-H3-Multishot/h3_episode_tools.py      (StudioControls, StudioSwitches, AnySwitch)
+  ComfyUI-H3-Multishot/h3_lora_stack.py         (H3LoraStack)
+  ComfyUI-H3-Multishot/h3_gguf_arch.py          (teaches ComfyUI-GGUF the minimax_h3 arch)
+  ComfyUI-H3-Multishot/apply_gguf_arch_patch.py
+  ComfyUI-H3-Multishot/LICENSE
+  workflows/H3_Seamless_Chain_v2.json           (full)
+  workflows/H3_Seamless_Chain_CORE.json         (zero third-party deps)
+  INSTALL.md  SETTINGS.md  PROMPTING.md
+```
+
+---
+
+## Troubleshooting
+
+### A word is clipped at a join
+
+Two causes, in order of likelihood.
+
+1. **The script put dialogue at the head of a shot.** The first ~1s of every chained shot is discarded replay, so an opening syllable there is trimmed away with it. Fix it in the script: apply the AIRLOCK rule and give the shot about two quiet seconds before anyone speaks.
+2. **The seam cut landed on speech.** v2.0's smart weld searches the incoming shot's first 0.75s for the quietest gap and cuts there instead of at sample 0. If you are on an older release, or the shot head has no quiet gap at all to find, the weld has nothing to work with - the fix is still the script.
+
+Also check that no single spoken line straddles two shots, and that `dialogue + 4s` fits your `frames_per_shot`.
+
+### Each shot is sharper than the last
+
+This is the seam sharpening ratchet: texture compounds roughly **1.3x per join**, so it is invisible at 3 shots and obvious at 8. Set:
+
+```
+chain_gain_control = flatten
+```
+
+Recommended on any chain past about 5 shots.
+
+### The render stalls at 0 steps, or runs ~5x slower than it should
+
+Almost always a **VRAM spill into system RAM**: the DiT loads only partially and streams the remainder from RAM on every step. v2.0 detects this and names it in the ComfyUI console - check there first, because it used to present as an unexplained slowdown with no message.
+
+Remedies, in order:
+
+1. Lower resolution or `frames_per_shot`, or use a smaller quant (`Q5_1` for 24-32GB, `Q4_0` for 16GB).
+2. Set the activation-reserve override on the VRAM/SPEED panel. ComfyUI's inference-memory estimate is very conservative at large frame counts, and reserving a measured value instead reclaims the difference for resident weights.
+3. Enable the VRAM/SPEED switches (their packs are part of the full workflow's requirements). These change the numerics slightly, so they are OFF by default - turn them on only after you have a baseline you trust.
+
+### Red or missing nodes when the workflow loads
+
+You loaded `H3_Seamless_Chain_v2.json` (the FULL graph) without one of its required packs. Either:
+
+- install the missing pack from the [Optional](#optional) table - the node's title tells you which one - or
+- load `H3_Seamless_Chain_CORE.json` instead, which has no third-party nodes at all.
+
+If **every** node from this pack is red, the pack itself did not load: confirm it is in `ComfyUI/custom_nodes/`, confirm ComfyUI is **v0.30.0+**, and read the console for an import error on startup.
+
+### `Unexpected architecture type in GGUF file: 'minimax_h3'`
+
+ComfyUI-GGUF validates a GGUF's architecture against a fixed list and rejects the file before reading any tensors; upstream's list has no `minimax_h3` entry. The quant is fine. This pack teaches it that architecture. If you see the error anyway, the patch is not active - apply it on disk and restart:
+
+```bash
+cd ComfyUI/custom_nodes/ComfyUI-H3-Multishot
+python apply_gguf_arch_patch.py
+```
+
+If a **GGUF text encoder** fails with a state_dict or vision mismatch instead, you are loading it with the stock `CLIPLoaderGGUF`. Use this pack's **H3 CLIP Loader (safetensors + GGUF)**. If it reports no vision sidecar resolved, set its `mmproj_name` widget to the sidecar directly — that bypasses filename pairing entirely.
+
+### Audio gets duller the longer the chain runs
+
+Real and expected: each hop costs a little audio brightness, and it accumulates. There is no dial for it. The working practice is to **restart the chain on scene cuts** - render a long scene as several chains and cut between them, rather than as one chain of many hops. Very long chains are explicitly in the not-yet-verified list below.
+
+---
+
+## Verified / not yet verified
+
+Stated honestly, because the difference matters when you are budgeting GPU hours.
+
+**Verified**
+
+- A 3-shot `context_pin` chain and multi-shot `first_frame` chains were reviewed **blind** by two independent video-understanding models. One described the result as one continuous unedited take, colour consistent, with nothing broken.
+- Verified on **both** static talking-head content and dynamic moving content.
+- Identity held across a **40-second two-character scene with zero reference images** supplied.
+- The blind-reviewed recipe: **fl2va checkpoint, euler sampler, beta57 scheduler, 14 steps, 362 frames per shot (~15.1s at 24fps)**, all VRAM/SPEED switches OFF, no voice anchor.
+- The **shipped** defaults differ deliberately: `ref2va` with `self_anchor_voice` and the bank on, for explicit voice and character identity. That combination has **not** been through blind review — it is the same chaining mechanism with reference rows added.
+- `pass1_fraction = 0.4` for the two-pass upscale.
+- `seed_per_shot` ON holds the face; one seed shared across shots drifted face and voice.
+
+**Not yet verified**
+
+- **Very long chains.** Audio dulls slightly per hop. Restart chains on scene cuts.
+- **The ref2va + bank + `context_pin` combination.** Untested together.
+- **Hard-FFLF boundary-plate mode** (`flf_chain`). It now fails loudly without plates rather than rendering an unanchored chain, but the mode itself has not been validated.
+
+If you get a result outside this envelope, good or bad, an issue with the settings block is genuinely useful.
+
+---
+
+## Credits
+
+- **MiniMax** - the H3 model.
+- **Comfy-Org / ComfyUI** - native H3 support and the text encoder + VAE distribution.
+- **NikoDemon80** - [ComfyUI-H3-Motion-Context](https://github.com/NikoDemon80/ComfyUI-H3-Motion-Context), the raw-latent motion-context mechanism `context_pin` is built on.
+- **city96** - [ComfyUI-GGUF](https://github.com/city96/ComfyUI-GGUF).
+- **pythongosssss** - [ComfyUI-Custom-Scripts](https://github.com/pythongosssss/ComfyUI-Custom-Scripts) (`ShowText` preview).
+- **JoyAI Echo** - ComfyUI_JoyAI_Echo_GGUF_Nodes, the `JoyEcho_LLMEnhance` prompt writer.
+- **ComfyUI-sol-attn** - memory-efficient attention and chunked feed-forward.
+- **comfyui-minimax-h3-blockcache-T8** - block cache.
+- **@viralesveras** - keyframe position parsing and `images_batch`, contributed upstream in this repo.
+
+Pack and workflows by **jlucasmcrell** (GitHub) / **joeygambino** (Hugging Face, Civitai).
 
 ## Support
 
-Everything here is free and stays free - the format spec, the nodes, the
-workflows, the cartridges, the LoRAs. If it saved you a night of debugging (it
-contains several hundred of mine), tips keep the 5090 warm:
+Everything here is free and stays free. If it saved you a night of debugging:
 
-* [Buy me a coffee on Ko-fi](https://ko-fi.com/joeygambino)
-* [Sponsor on GitHub](https://github.com/sponsors/jlucasmcrell)
-* [Liberapay](https://liberapay.com/joeygambino) (recurring)
+- [Ko-fi](https://ko-fi.com/joeygambino)
+- [GitHub Sponsors](https://github.com/sponsors/jlucasmcrell)
+- [Liberapay](https://liberapay.com/joeygambino) (recurring)
 
-## On Civitai
+## License
 
-- [MiniMax-H3 Multishot (workflows)](https://civitai.com/models/2833322)
-- [MiniMax-H3 GGUF - the DiT](https://civitai.com/models/2833352)
-- [MiniMax-H3 Text Encoder GGUF](https://civitai.com/models/2834385)
+See `ComfyUI-H3-Multishot/LICENSE` in the release.
