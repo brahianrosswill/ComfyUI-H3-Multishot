@@ -149,9 +149,15 @@ except Exception as e:
     print(f"[Rebels JE] joyecho_ref_picker failed to load: {e!r}", flush=True)
 
 # ---------------------------------------------------------------- Auto-finish (RTX upscale + master concat after render)
-# joyecho_autofinish is omitted from this distribution: it spawns an
-# out-of-tree worker script that is not shipped, so the node could only
-# fail. Nothing else in the pack depends on it.
+try:
+    from .joyecho_autofinish import (
+        NODE_CLASS_MAPPINGS as _AF_CM,
+        NODE_DISPLAY_NAME_MAPPINGS as _AF_DM,
+    )
+    NODE_CLASS_MAPPINGS.update(_AF_CM)
+    NODE_DISPLAY_NAME_MAPPINGS.update(_AF_DM)
+except Exception as e:
+    print(f"[Rebels JE] joyecho_autofinish failed to load: {e!r}", flush=True)
 
 try:
     from .joyecho_cartridge import (
