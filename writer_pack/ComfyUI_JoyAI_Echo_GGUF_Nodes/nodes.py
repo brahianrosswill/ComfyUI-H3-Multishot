@@ -4226,10 +4226,84 @@ class JoyEcho_LLMEnhance:
         }
 
         print(f"[JoyEcho] Calling LLM ({model_name}) to enhance prompt...", flush=True)
-        # Ollama cloud models (minimax-m3, glm) intermittently return EMPTY
-        # completions (observed 2026-08-06: 177s call, blank content). Retry
-        # the call itself up to 3 times before failing the run.
+
+        def _clean_to_json(raw):
+            """Peel everything that is not the {"prompts":[...]} envelope."""
+            import re as _re
+            c = _re.sub(r"<think>.*?</think>", "", raw,
+                        flags=_re.DOTALL | _re.IGNORECASE).strip()
+            # A fence may sit on its own line OR share the line with the JSON
+            # (```json {"prompts": ...). Dropping whole fence lines threw the
+            # payload away in the second case, so strip the token itself first.
+            c = _re.sub(r"^\s*```[a-zA-Z0-9_-]*[ \t]*", "", c)
+            c = _re.sub(r"\s*```\s*$", "", c).strip()
+            c = "\n".join(l for l in c.split("\n")
+                          if not l.strip().startswith("```")).strip()
+            if not (c.startswith("{") and c.endswith("}")):
+                _obj = _extract_json_object(c)
+                if _obj is not None:
+                    c = _obj
+            if (not (c.startswith("{") and c.endswith("}"))
+                    and "integrated_multimodal_description:" in c):
+                _blocks = [b.strip() for b in
+                           _re.split(r"(?m)^---\s*$", c) if b.strip()]
+                if _blocks:
+                    c = json.dumps({"prompts": _blocks})
+                    print(f"[JoyEcho] LLMEnhance: wrapped {len(_blocks)} raw H3 "
+                          f"block(s) into the prompts envelope.", flush=True)
+            return c
+
+        def _salvage_prompts(raw):
+            """Last resort: pull COMPLETE shot strings out of a broken payload.
+
+            Local models truncate mid-string at the token ceiling, and some
+            narrate their way out of the array. Neither leaves a balanced
+            object, so json.loads cannot help. Every element that DID close
+            cleanly is still a usable prompt - take those and drop the partial
+            tail rather than losing the whole render.
+            """
+            import re as _re
+            m = _re.search(r'"prompts"\s*:\s*\[', raw)
+            if not m:
+                return []
+            body = raw[m.end():]
+            n = len(body)
+            out = []
+            i = 0
+            while i < n:
+                if body[i] != '"':
+                    i += 1
+                    continue
+                j = i + 1
+                buf = []
+                closed = False
+                while j < n:
+                    ch = body[j]
+                    if ch == "\\" and j + 1 < n:
+                        buf.append(body[j:j + 2])
+                        j += 2
+                        continue
+                    if ch == '"':
+                        closed = True
+                        break
+                    buf.append(ch)
+                    j += 1
+                if not closed:
+                    break
+                try:
+                    out.append(json.loads('"' + "".join(buf) + '"'))
+                except Exception:
+                    pass
+                i = j + 1
+            return [s for s in out if len(s) > 120]
+
+        # Ollama cloud models intermittently return EMPTY completions, and
+        # local models regularly emit prose around or inside the envelope.
+        # BOTH are retried here: parsing used to sit OUTSIDE this loop, so one
+        # malformed answer killed a render that a re-ask would have fixed.
         _raw = ""
+        data = None
+        _perr = None
         for _attempt in range(3):
             req = urllib.request.Request(url, data=payload, headers=headers, method="POST")
             try:
@@ -4239,63 +4313,53 @@ class JoyEcho_LLMEnhance:
                 body = e.read().decode("utf-8", errors="replace")
                 raise RuntimeError(f"LLM API error {e.code}: {body}")
             _raw = result["choices"][0]["message"]["content"].strip()
-            if _raw:
+            if not _raw:
+                print(f"[JoyEcho] LLMEnhance: EMPTY completion from {model_name} "
+                      f"(attempt {_attempt+1}/3) - retrying...", flush=True)
+                import time as _t
+                _t.sleep(3)
+                continue
+            content = _clean_to_json(_raw)
+            try:
+                _d = json.loads(content)
+                if "prompts" not in _d or not isinstance(_d["prompts"], list):
+                    raise ValueError("output missing 'prompts' array")
+                if not _d["prompts"]:
+                    raise ValueError("'prompts' array is empty")
+                data = _d
                 break
-            print(f"[JoyEcho] LLMEnhance: EMPTY completion from {model_name} "
-                  f"(attempt {_attempt+1}/3) - retrying...", flush=True)
-            import time as _t
-            _t.sleep(3)
-        if not _raw:
-            raise RuntimeError(
-                f"{model_name} returned 3 EMPTY completions in a row (~2 min each). "
-                f"This is the reasoning-budget failure mode: thinking models "
-                f"(minimax-m3) can exhaust their budget on long enhancer prompts "
-                f"and emit no answer. Switch the model widget to the vetted writer "
-                f"(deepseek-v4-pro:cloud) - no restart needed, just re-run.")
-        content = _raw
+            except (json.JSONDecodeError, ValueError) as e:
+                _perr = e
+                print(f"[JoyEcho] LLMEnhance: unparseable output from "
+                      f"{model_name} ({e}) (attempt {_attempt+1}/3) - "
+                      f"retrying...", flush=True)
+                import time as _t
+                _t.sleep(3)
 
-        # Rebels local patch: robust enhancer JSON extraction. Reasoning / cloud
-        # models (e.g. minimax-m3) may wrap the answer in <think>...</think>
-        # traces or add preamble/trailing commentary; the pipeline needs ONLY the
-        # {"prompts":[...]} object. A reasoning trace cannot be reliably prompted
-        # away, so peel it here instead of failing the whole enhance.
-        import re as _re
-        content = _re.sub(r"<think>.*?</think>", "", content,
-                          flags=_re.DOTALL | _re.IGNORECASE).strip()
-
-        # Strip markdown code fences if present
-        if content.startswith("```"):
-            lines = content.split("\n")
-            lines = [l for l in lines if not l.strip().startswith("```")]
-            content = "\n".join(lines).strip()
-
-        # Still-surrounding prose? Carve out the outermost balanced {...} object.
-        if not (content.startswith("{") and content.endswith("}")):
-            _obj = _extract_json_object(content)
-            if _obj is not None:
-                content = _obj
-
-        # H3-native fallback: a writer following the H3 block doctrine may emit
-        # raw blocks separated by --- lines instead of the JSON envelope. Wrap
-        # them into {"prompts": [...]} rather than failing the run.
-        if not (content.startswith("{") and content.endswith("}"))                 and "integrated_multimodal_description:" in content:
-            _blocks = [b.strip() for b in
-                       _re.split(r"(?m)^---\s*$", content) if b.strip()]
-            if _blocks:
-                content = json.dumps({"prompts": _blocks})
-                print(f"[JoyEcho] LLMEnhance: wrapped {len(_blocks)} raw H3 "
-                      f"block(s) into the prompts envelope.", flush=True)
-
-        # Validate JSON
-        try:
-            data = json.loads(content)
-            if "prompts" not in data or not isinstance(data["prompts"], list):
-                raise ValueError("LLM output missing 'prompts' array")
-            num = len(data["prompts"])
-        except (json.JSONDecodeError, ValueError) as e:
-            raise RuntimeError(
-                f"LLM returned invalid JSON: {e}\n\nRaw output:\n{_raw[:800]}"
-            )
+        if data is None:
+            _sal = _salvage_prompts(_raw)
+            if _sal:
+                data = {"prompts": _sal}
+                print(f"[JoyEcho] LLMEnhance: output never parsed cleanly; "
+                      f"SALVAGED {len(_sal)} complete shot(s) and dropped the "
+                      f"truncated tail. Check SCRIPT PREVIEW before rendering.",
+                      flush=True)
+            elif not _raw:
+                raise RuntimeError(
+                    f"{model_name} returned 3 EMPTY completions in a row "
+                    f"(~2 min each). Thinking models can exhaust their "
+                    f"reasoning budget on long enhancer prompts and emit no "
+                    f"answer. Switch the model widget to a vetted writer - no "
+                    f"restart needed, just re-run.")
+            else:
+                raise RuntimeError(
+                    f"{model_name} returned unusable output 3 times and "
+                    f"nothing could be salvaged: {_perr}\n\n"
+                    f"Smaller local models often narrate instead of emitting "
+                    f"JSON, or truncate mid-array. Try a larger model, or set "
+                    f"mode to 'passthrough (raw JSON, skip LLM)' and supply "
+                    f"the script yourself.\n\nRaw output:\n{_raw[:800]}")
+        num = len(data["prompts"])
 
         print(f"[JoyEcho] LLM generated {num} shot prompt(s).", flush=True)
 
