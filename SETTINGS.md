@@ -120,9 +120,21 @@ three-hour render (issue #13).
 |---|---|---|
 | `preview_first_shot` | `off` | Writes shot 1 to `output/video/H3_FIRSTSHOT/` the moment it decodes — minutes before the chain finishes — so a bad take can be cancelled early. The full path is printed to the console. |
 | `save_every_shot` | `off` | Writes **every** shot to `output/video/H3_SHOTS/` as it decodes, alongside the master. Insurance for long chains: anything that fails after the last shot — a mux OOM, a full disk, a closed tab — otherwise destroys the entire render at once. Files are written *before* the seam trim, so consecutive shots overlap by about a second; the master is still the clean join. |
+| `audio_tone_control` | `off` | Audio twin of `chain_gain_control`, aimed the other way: chained audio drifts **duller** per hop where video drifts sharper (measured: 8-shot chains lose 8–50% (seed-dependent) of their 4–10 kHz energy even with the pinned bank slot, 84–92% without it). `flatten` EQ-matches every shot's long-term spectral envelope to shot 1's before the weld — constant per-shot gains, a linear filter so no pumping, clamped ±9 dB, half-strength in the top band so it cannot manufacture hiss. |
 | `sigmas` | unwired | Optional custom sigma schedule (a `SIGMAS` link, no widget). Replaces sampler/scheduler + steps entirely — some turbo LoRAs ship a schedule they need in order to work at all. When connected, `steps` becomes `len(sigmas)-1`, the two-pass split is taken as a fraction of *your* curve, and the console says the steps/scheduler widgets are being ignored. |
 | `reference_image_size` | `match` | `max` uses 2048 px references for best identity fidelity, but reference tokens ride through every sampling step, so it can be several times slower. |
 | `seed` | randomize | Fix it to make a good take reproducible. |
+
+**Audio dulls over long chains — measured, and the bank is the counter.** Five-arm
+A/B (2026-08-11, 8-shot chains): with `bank_pinned=0` the conditioning is pure
+recency — each shot hears only the one before it — and the voice band collapses
+(84–92% of 4–10 kHz energy gone by shot 8). With the default pinned slot the
+drift is 8–13%. Continuity mode is irrelevant to this; the bank decides. There
+is no true "bank off": `memory_frames=0, bank_pinned=0` still leaves one
+recency slot, which is the *worst* configuration, and the node warns about it
+on chains past 4 shots. Keep `bank_pinned` at 1 and use
+`audio_tone_control=flatten` to level the residual drift.
+
 
 ---
 

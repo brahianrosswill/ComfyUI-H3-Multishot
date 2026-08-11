@@ -149,6 +149,22 @@ no Motion-Context → `continuity=first_frame`.
 
 ## New in v2.1.3
 
+- **Audio dulling over long chains: measured, mechanism found, countered.**
+  Five-arm A/B on 8-shot chains: with `bank_pinned=0` (pure recency
+  conditioning) the voice band collapses - 84-92% of 4-10 kHz energy gone by
+  shot 8; with the default pinned slot, 8-50% depending on seed. It is the audio twin of the
+  seam sharpening ratchet, running the other way, and continuity mode is
+  irrelevant - the bank decides. Two counters ship: a console warning when
+  `bank_pinned=0` on a chain past 4 shots (there is no true "bank off" - 0/0
+  leaves one recency slot, the worst configuration), and
+  **`audio_tone_control=flatten`** - the audio twin of
+  `chain_gain_control=flatten`, EQ-matching every shot's long-term spectral
+  envelope to shot 1's before the weld. Constant per-shot gains, clamped
+  +/-9 dB, half-strength in the top band so it cannot manufacture hiss.
+  Paired A/B on the worst seed: HF loss halved (-49.5% -> -23.7%), rolloff
+  drift cut to a third. It reduces the drift rather than eliminating it (the
+  context_pin replay carries raw latents the EQ cannot reach), and it ships
+  OFF until ears, not spectra, have judged it.
 - **The Audio Spine produced static with real-world audio files (ref2va,
   user-reported).** The spine encoded `guide_audio` at whatever sample rate the
   file arrived in, while the audio VAE expects its own rate (32 kHz) - the

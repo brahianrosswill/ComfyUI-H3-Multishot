@@ -75,6 +75,69 @@ def _repair_json(text):
 
 
 
+_AT_NBANDS = 8
+
+
+def _at_ltas(wav, sr=32000, nfft=2048):
+    """Long-term average spectrum of a [C, L] / [1, C, L] waveform in
+    _AT_NBANDS log-spaced bands (100 Hz .. ~12 kHz). Long-term, so per-shot
+    speech content averages out and only the spectral TILT is measured."""
+    import torch
+    x = wav.reshape(-1, wav.shape[-1]).float().mean(0)
+    n = (x.shape[-1] // nfft) * nfft
+    if n < nfft:
+        return None
+    S = torch.stft(x[:n], nfft, hop_length=nfft // 2,
+                   window=torch.hann_window(nfft), return_complex=True)
+    P = (S.abs() ** 2).mean(-1)
+    f = torch.linspace(0, sr / 2, P.shape[0])
+    edges = torch.logspace(2, 4.08, _AT_NBANDS + 1)
+    out = []
+    for i in range(_AT_NBANDS):
+        m = (f >= edges[i]) & (f < edges[i + 1])
+        out.append(P[m].mean() if m.any() else P.new_tensor(0.0))
+    return torch.stack(out).clamp_min(1e-12)
+
+
+def _at_flatten(wav, house, sr=32000, nfft=2048, max_db=9.0):
+    """EQ-match a shot's long-term spectral envelope to the house envelope.
+
+    The audio twin of _cg_flatten, aimed the other way: chained audio drifts
+    DULLER per hop where chained video drifts sharper. Measured 2026-08-11 on
+    8-shot chains: 4-10 kHz energy fell 84-92% on pure-recency conditioning
+    (bank_pinned=0) and 8-13% even with the pinned slot. Constant per-shot
+    gains applied via STFT - a linear filter, so no pumping. Clamped to
+    +/-max_db, half-strength in the top band so it cannot manufacture hiss
+    where the model genuinely rendered none.
+    """
+    import torch
+    cur = _at_ltas(wav, sr, nfft)
+    if cur is None or house is None:
+        return wav, 0.0
+    gain_db = (10.0 * torch.log10(house / cur)).clamp(-max_db, max_db)
+    gain_db[-1] = gain_db[-1] * 0.5
+    if float(gain_db.abs().max()) < 0.75:
+        return wav, 0.0
+    f = torch.linspace(0, sr / 2, nfft // 2 + 1)
+    edges = torch.logspace(2, 4.08, _AT_NBANDS + 1)
+    centres = (edges[:-1] * edges[1:]).sqrt()
+    logf = torch.log10(f.clamp_min(1.0))
+    logc = torch.log10(centres)
+    idx = torch.bucketize(logf, logc).clamp(1, _AT_NBANDS - 1)
+    x0, x1 = logc[idx - 1], logc[idx]
+    w = ((logf - x0) / (x1 - x0)).clamp(0, 1)
+    curve = 10.0 ** ((gain_db[idx - 1] * (1 - w) + gain_db[idx] * w) / 20.0)
+    shape = wav.shape
+    x = wav.reshape(-1, shape[-1]).float()
+    win = torch.hann_window(nfft)
+    S = torch.stft(x, nfft, hop_length=nfft // 4, window=win,
+                   return_complex=True)
+    S = S * curve.unsqueeze(0).unsqueeze(-1)
+    y = torch.istft(S, nfft, hop_length=nfft // 4, window=win,
+                    length=shape[-1])
+    return y.reshape(shape).to(wav.dtype), float(gain_db.abs().max())
+
+
 def _wav_for_vae(audio_vae, audio, what):
     """AUDIO dict -> [1, C, L] waveform at the VAE's own sample rate, stereo.
 
@@ -2333,6 +2396,18 @@ class H3MultishotMemorySampler:
                            "trim, so consecutive files overlap by ~1s; the "
                            "master is still the clean join. Costs one file "
                            "write per shot."}),
+            "audio_tone_control": (["off", "flatten"], {
+                "default": "off",
+                "tooltip": "Audio twin of chain_gain_control, aimed the other "
+                           "way: chained audio drifts DULLER per hop where "
+                           "video drifts sharper. Measured on 8-shot chains: "
+                           "4-10 kHz energy fell 8-13% even with the pinned "
+                           "bank slot, and 84-92% without it (bank_pinned=0). "
+                           "'flatten' EQ-matches every shot's long-term "
+                           "spectral envelope to shot 1's before the weld - "
+                           "constant per-shot gains (a linear filter, no "
+                           "pumping), clamped to +/-9 dB, half-strength in "
+                           "the top band so it cannot manufacture hiss."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
@@ -2370,7 +2445,7 @@ class H3MultishotMemorySampler:
             self_anchor_voice=False, reference_image_size="match",
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
-            upscale_model=None):
+            upscale_model=None, audio_tone_control="off"):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -2585,9 +2660,17 @@ class H3MultishotMemorySampler:
                     "is two trajectories. Disconnect guide_audio, or turn "
                     "two_pass_upscale off.")
         _cc_mu = _cc_cov = None  # house colour stats (shot 1 settled tail)
+        _at_house = None         # house audio envelope (shot 1)
         _cp_prev = None   # context_pin: previous shot's full AV latent
         _cp_trim = 0
 
+        if bank_pinned == 0 and n > 4:
+            print("[H3Memory] WARNING: bank_pinned=0 on a %d-shot chain. "
+                  "With no pinned slot the conditioning is pure recency - "
+                  "each shot hears only the one before it - and audio "
+                  "COLLAPSES: measured 84-92%% loss of 4-10 kHz energy by "
+                  "shot 8 (five-arm A/B, 2026-08-11). Set bank_pinned=1, "
+                  "and consider audio_tone_control=flatten." % n, flush=True)
         print(f"[H3Memory] JoyEcho-style memory bank: no keyframe, "
               f"{bank_pinned} pinned + {cap - min(bank_pinned, cap)} recent "
               f"slot(s), {_jb_grid(bank_clip_frames)}f clips. Needs a ref2va "
@@ -3198,6 +3281,17 @@ class H3MultishotMemorySampler:
                     imgs = _cc_apply(imgs, _cc_mu, _cc_cov)
                     print("[H3Memory] colour levelled to house", flush=True)
 
+
+            if audio_tone_control == "flatten":
+                if si == 0:
+                    _at_house = _at_ltas(wav, sr)
+                    print("[H3Memory] audio tone: house envelope set "
+                          "(shot 1)", flush=True)
+                elif _at_house is not None:
+                    wav, _gmax = _at_flatten(wav, _at_house, sr)
+                    if _gmax > 0:
+                        print("[H3Memory] audio tone: levelled to house "
+                              "(max band gain %.1f dB)" % _gmax, flush=True)
 
             if chain_gain_control != "off":
                 _w = min(_CG_WIN, imgs.shape[0])
