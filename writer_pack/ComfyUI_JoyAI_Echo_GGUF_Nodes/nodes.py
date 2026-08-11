@@ -3760,6 +3760,18 @@ def _llme_shots_in(story_idea):
             pass
         # valid-but-unusable JSON, or malformed JSON: it is still prose
         return [src], False
+    # Plain text: honour --- separators, the SAME rule the sampler uses in
+    # h3_multishot_utils._parse_script. example_script.txt ships --- separated
+    # and every doc says to write scripts that way, but this helper returned
+    # the whole file as ONE shot - so a pasted multi-shot script in passthrough
+    # mode rendered the entire text as shot 1 and then repeated it to fill
+    # shot_count. A single paragraph still returns as one shot, so LPFF .txt
+    # batches are unaffected.
+    import re as _re_split
+    _blocks = [b.strip() for b in _re_split.split(r"(?m)^---\s*$", src)
+               if b.strip()]
+    if len(_blocks) > 1:
+        return _blocks, False
     return [src], False
 
 

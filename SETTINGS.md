@@ -119,6 +119,8 @@ quietly producing a weaker join. Two-pass is available on `cut`, `seamless`,
 | Dial | Default | What it does |
 |---|---|---|
 | `preview_first_shot` | `off` | Writes shot 1 to `output/video/H3_FIRSTSHOT/` the moment it decodes — minutes before the chain finishes — so a bad take can be cancelled early. The full path is printed to the console. |
+| `save_every_shot` | `off` | Writes **every** shot to `output/video/H3_SHOTS/` as it decodes, alongside the master. Insurance for long chains: anything that fails after the last shot — a mux OOM, a full disk, a closed tab — otherwise destroys the entire render at once. Files are written *before* the seam trim, so consecutive shots overlap by about a second; the master is still the clean join. |
+| `sigmas` | unwired | Optional custom sigma schedule (a `SIGMAS` link, no widget). Replaces sampler/scheduler + steps entirely — some turbo LoRAs ship a schedule they need in order to work at all. When connected, `steps` becomes `len(sigmas)-1`, the two-pass split is taken as a fraction of *your* curve, and the console says the steps/scheduler widgets are being ignored. |
 | `reference_image_size` | `match` | `max` uses 2048 px references for best identity fidelity, but reference tokens ride through every sampling step, so it can be several times slower. |
 | `seed` | randomize | Fix it to make a good take reproducible. |
 

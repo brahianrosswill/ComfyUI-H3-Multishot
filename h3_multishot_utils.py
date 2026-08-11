@@ -75,6 +75,40 @@ def _repair_json(text):
 
 
 
+def _write_shot_mp4(imgs, wav, sr, prefix, label, tag):
+    """Write one decoded shot to disk immediately, and never let that kill
+    the render.
+
+    A long chain represents hours of GPU time that only becomes a file at
+    the very end, when the master is muxed. Anything that fails after the
+    last shot - a mux OOM, a full disk, a cancelled tab - has historically
+    destroyed every shot at once (issue #13). Each shot written as it
+    decodes turns that from lost work into a joining job.
+
+    Returns the path written, or None (already reported) on failure.
+    """
+    try:
+        import os
+        from fractions import Fraction
+        import folder_paths
+        from comfy_api.latest import InputImpl, Types
+        w = wav if wav.ndim == 3 else wav.unsqueeze(0)
+        folder, fname, counter, _sub, _pfx = folder_paths.get_save_image_path(
+            prefix, folder_paths.get_output_directory(),
+            imgs.shape[2], imgs.shape[1])
+        path = os.path.join(folder, f"{fname}_{counter:05}_.mp4")
+        InputImpl.VideoFromComponents(Types.VideoComponents(
+            images=imgs.detach().cpu(),
+            audio={"waveform": w.detach().cpu(), "sample_rate": sr},
+            frame_rate=Fraction(24))).save_to(path)
+        print(f"[{tag}] {label} -> {path}", flush=True)
+        return path
+    except Exception as e:
+        print(f"[{tag}] {label} FAILED to save (render continues): {e}",
+              flush=True)
+        return None
+
+
 def _smart_head_trim(wav, sr, trim, search_s=0.75):
     """Remove `trim` samples from a chained shot's audio HEAD, cutting at
     the QUIETEST spot in the first `search_s` seconds instead of blindly
@@ -1148,6 +1182,27 @@ class H3MultishotSampler:
                            "frozen_anchor = DIAGNOSTIC: every shot anchors on "
                            "shot 1 tail; flattens the ratchet but identity may "
                            "drift - use to prove the loop, not to ship."}),
+            "sigmas": ("SIGMAS", {
+                "tooltip": "Optional custom sigma schedule, replacing "
+                           "sampler/scheduler + steps entirely. Some turbo "
+                           "LoRAs ship a schedule they need in order to work "
+                           "at all. When this is connected the 'steps' and "
+                           "'scheduler' widgets are IGNORED - the step count "
+                           "becomes len(sigmas)-1 - and the console says so. "
+                           "The two-pass upscale split is taken as a fraction "
+                           "of the supplied schedule."}),
+            "save_every_shot": ("BOOLEAN", {
+                "default": False, "label_on": "write each shot as it decodes",
+                "label_off": "off",
+                "tooltip": "Write EVERY shot to output/video/H3_SHOTS/ the "
+                           "moment it decodes, in addition to the master. "
+                           "Insurance for long chains: everything that fails "
+                           "after the last shot - a mux OOM, a full disk, a "
+                           "cancelled tab - otherwise destroys the whole "
+                           "render at once. Shots are written BEFORE the seam "
+                           "trim, so consecutive files overlap by ~1s; the "
+                           "master is still the clean join. Costs one file "
+                           "write per shot."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "IMAGE", "AUDIO")
@@ -1164,7 +1219,8 @@ class H3MultishotSampler:
             self_anchor_voice=False, two_pass_upscale=False,
             upscale_factor=1.5, pass1_fraction=0.4,
             upscale_audio_denoise=0.35, reference_image_size="match",
-            preview_first_shot=False, chain_gain_control="off"):
+            preview_first_shot=False, chain_gain_control="off",
+            save_every_shot=False, sigmas=None):
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -1239,7 +1295,17 @@ class H3MultishotSampler:
                   flush=True)
             shots.append(shots[-1])
 
-        sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps, 1.0)[0]
+        if sigmas is not None and len(sigmas) > 1:
+            # a supplied schedule wins: some turbo LoRAs only converge on the
+            # exact curve they shipped with, and silently re-deriving one from
+            # steps+scheduler would make them look broken rather than misused
+            steps = int(len(sigmas)) - 1
+            print("[%s] custom sigmas supplied (%d steps): the steps and "
+                  "scheduler widgets are ignored for this run."
+                  % ("H3Multishot", steps), flush=True)
+        else:
+            sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler,
+                                                     steps, 1.0)[0]
         sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
 
         # --- two-pass upscale setup: low-res pass 1, exact full-res pass 2 ---
@@ -1541,26 +1607,14 @@ class H3MultishotSampler:
                 if preview_first_shot:
                     # write shot 1 NOW - minutes before the chain finishes -
                     # so a bad take can be cancelled instead of waited out
-                    try:
-                        import os
-                        from fractions import Fraction
-                        import folder_paths
-                        from comfy_api.latest import InputImpl, Types
-                        folder, fname, counter, _sub, _pfx = \
-                            folder_paths.get_save_image_path(
-                                "video/H3_FIRSTSHOT/firstshot",
-                                folder_paths.get_output_directory(),
-                                first_frames.shape[2], first_frames.shape[1])
-                        path = os.path.join(folder,
-                                            f"{fname}_{counter:05}_.mp4")
-                        InputImpl.VideoFromComponents(Types.VideoComponents(
-                            images=first_frames, audio=first_audio,
-                            frame_rate=Fraction(24))).save_to(path)
-                        print(f"[H3Multishot] FIRST-SHOT PREVIEW saved -> "
-                              f"{path}", flush=True)
-                    except Exception as _e:
-                        print(f"[H3Multishot] first-shot preview save failed "
-                              f"(render continues): {_e}", flush=True)
+                    _write_shot_mp4(imgs, wav, sr,
+                                    "video/H3_FIRSTSHOT/firstshot",
+                                    "FIRST-SHOT PREVIEW saved", "H3Multishot")
+            if save_every_shot:
+                # before the seam trim: this file is the shot as rendered, so
+                # a chain that dies at the mux can still be joined by hand
+                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
+                                f"shot {si + 1}/{n} saved", "H3Multishot")
             if si > 0:
                 imgs = imgs[1:]                       # duplicated seam frame
                 trim = int(round(sr / 24.0))          # matching 1/24s audio
@@ -2243,6 +2297,27 @@ class H3MultishotMemorySampler:
                            "audio is locked (safest for voice identity), 1 = "
                            "full remix. 0.35 = light polish that preserves the "
                            "voice."}),
+            "sigmas": ("SIGMAS", {
+                "tooltip": "Optional custom sigma schedule, replacing "
+                           "sampler/scheduler + steps entirely. Some turbo "
+                           "LoRAs ship a schedule they need in order to work "
+                           "at all. When this is connected the 'steps' and "
+                           "'scheduler' widgets are IGNORED - the step count "
+                           "becomes len(sigmas)-1 - and the console says so. "
+                           "The two-pass upscale split is taken as a fraction "
+                           "of the supplied schedule."}),
+            "save_every_shot": ("BOOLEAN", {
+                "default": False, "label_on": "write each shot as it decodes",
+                "label_off": "off",
+                "tooltip": "Write EVERY shot to output/video/H3_SHOTS/ the "
+                           "moment it decodes, in addition to the master. "
+                           "Insurance for long chains: everything that fails "
+                           "after the last shot - a mux OOM, a full disk, a "
+                           "cancelled tab - otherwise destroys the whole "
+                           "render at once. Shots are written BEFORE the seam "
+                           "trim, so consecutive files overlap by ~1s; the "
+                           "master is still the clean join. Costs one file "
+                           "write per shot."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
@@ -2264,7 +2339,8 @@ class H3MultishotMemorySampler:
             self_anchor_voice=False, reference_image_size="match",
             preview_first_shot=False, two_pass_upscale=False,
             upscale_factor=1.5, pass1_fraction=0.4,
-            upscale_audio_denoise=0.35):
+            upscale_audio_denoise=0.35, save_every_shot=False,
+            sigmas=None):
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -2283,7 +2359,17 @@ class H3MultishotMemorySampler:
         while len(shots) < n:
             shots.append(shots[-1])
 
-        sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler, steps, 1.0)[0]
+        if sigmas is not None and len(sigmas) > 1:
+            # a supplied schedule wins: some turbo LoRAs only converge on the
+            # exact curve they shipped with, and silently re-deriving one from
+            # steps+scheduler would make them look broken rather than misused
+            steps = int(len(sigmas)) - 1
+            print("[%s] custom sigmas supplied (%d steps): the steps and "
+                  "scheduler widgets are ignored for this run."
+                  % ("H3Memory", steps), flush=True)
+        else:
+            sigmas = ncs.BasicScheduler().get_sigmas(model, scheduler,
+                                                     steps, 1.0)[0]
         sampler = ncs.KSamplerSelect().get_sampler(sampler_name)[0]
 
         # --- voice anchor: encode ONCE, ride in every shot's conditioning ---
@@ -3163,28 +3249,14 @@ class H3MultishotMemorySampler:
             if si == 0 and preview_first_shot:
                 # write shot 1 NOW - minutes before the chain finishes - so a
                 # bad take can be cancelled instead of waited out
-                try:
-                    import os
-                    from fractions import Fraction
-                    import folder_paths
-                    from comfy_api.latest import InputImpl, Types
-                    _pw = wav if wav.ndim == 3 else wav.unsqueeze(0)
-                    _folder, _fn, _ct, _s1, _p1 = \
-                        folder_paths.get_save_image_path(
-                            "video/H3_FIRSTSHOT/firstshot",
-                            folder_paths.get_output_directory(),
-                            imgs.shape[2], imgs.shape[1])
-                    _path = os.path.join(_folder, f"{_fn}_{_ct:05}_.mp4")
-                    InputImpl.VideoFromComponents(Types.VideoComponents(
-                        images=imgs.detach().cpu(),
-                        audio={"waveform": _pw.detach().cpu(),
-                               "sample_rate": sr},
-                        frame_rate=Fraction(24))).save_to(_path)
-                    print(f"[H3Memory] FIRST-SHOT PREVIEW saved -> {_path}",
-                          flush=True)
-                except Exception as _e:
-                    print(f"[H3Memory] first-shot preview save failed "
-                          f"(render continues): {_e}", flush=True)
+                _write_shot_mp4(imgs, wav, sr,
+                                "video/H3_FIRSTSHOT/firstshot",
+                                "FIRST-SHOT PREVIEW saved", "H3Memory")
+            if save_every_shot:
+                # before the seam trim: this file is the shot as rendered, so
+                # a chain that dies at the mux can still be joined by hand
+                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
+                                f"shot {si + 1}/{n} saved", "H3Memory")
 
             # store this shot as a bank slot: centre clip + the audio under it
             clip_imgs, clip_start = _jb_centre_clip(imgs, bank_clip_frames)

@@ -153,6 +153,27 @@ All four of these are in the writer half of the pack
 (`ComfyUI_JoyAI_Echo_GGUF_Nodes`), so they only matter if you let the LLM write
 the shots. If you paste your own prompt list, nothing here changes for you.
 
+- **Every shot can now be saved as it renders.** A chain only became a file at
+  the very end, so anything that failed after the last shot destroyed the whole
+  run — one report was three hours lost to an OOM at the mux, *after* every shot
+  had rendered successfully. `save_every_shot` (both samplers) writes each shot
+  to `output/video/H3_SHOTS/` the moment it decodes. Written before the seam
+  trim, so consecutive files overlap ~1s and the master is still the clean join.
+  Requested in issue #13.
+- **Custom sigma schedules.** The samplers built the schedule themselves from
+  `steps` + `scheduler` with no way to supply your own, so a turbo LoRA that
+  ships the curve it needs simply ran wrong rather than refusing. Both samplers
+  now take an optional `SIGMAS` input; connect one and it replaces the schedule,
+  `steps` rebinds to `len(sigmas)-1` so the two-pass split rides your curve, and
+  the console says the widgets are being ignored instead of silently overriding
+  you. It is a link-only input, so saved graphs are unaffected. Issue #14.
+- **`---` separators were ignored in passthrough mode.** `example_script.txt`
+  ships `---` separated and every doc tells you to write scripts that way, but
+  the writer's passthrough path returned the whole file as ONE shot — which the
+  sampler then repeated to fill `shot_count`. Pasting a finished multi-shot
+  script rendered the entire text as shot 1, four times. It now splits on the
+  same rule the sampler uses. A single paragraph is still one shot, so `.txt`
+  batches are unaffected.
 - **Reference images had no way in.** The sampler's `reference_images`
   input has always existed, and `SETTINGS.md` documented it — as `unwired`,
   because nothing in the workflow was connected to it. There is now a
