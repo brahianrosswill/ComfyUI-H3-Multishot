@@ -75,6 +75,34 @@ def _repair_json(text):
 
 
 
+def _wav_for_vae(audio_vae, audio, what):
+    """AUDIO dict -> [1, C, L] waveform at the VAE's own sample rate, stereo.
+
+    Mirrors the native node's _encode_ref_audio (nodes_minimax_h3.py): resample
+    to the VAE's rate before encoding. The spine path used to skip this, so a
+    44.1/48 kHz voice file - i.e. nearly every real-world file - was encoded as
+    if it were 32 kHz. The latent was garbage, and because the spine LOCKS the
+    audio stream to that latent at every sampling step, the render came out as
+    static (user-reported on ref2va; the same file worked through the native
+    node, which resamples).
+
+    Mono is upmixed to stereo by duplication - the encoder wants two channels,
+    and refusing a mono file helps nobody.
+    """
+    w = audio["waveform"]
+    sr = int(audio["sample_rate"])
+    w3 = w if w.ndim == 3 else w.unsqueeze(0)
+    vae_sr = getattr(audio_vae, "audio_sample_rate", 32000)
+    if sr != vae_sr:
+        import torchaudio
+        w3 = torchaudio.functional.resample(w3, sr, vae_sr)
+        print(f"[H3] {what}: resampled {sr} -> {vae_sr} Hz", flush=True)
+    if w3.shape[1] == 1:
+        w3 = w3.repeat(1, 2, 1)
+        print(f"[H3] {what}: mono upmixed to stereo", flush=True)
+    return w3[:1], vae_sr
+
+
 def _write_shot_mp4(imgs, wav, sr, prefix, label, tag):
     """Write one decoded shot to disk immediately, and never let that kill
     the render.
@@ -2020,16 +2048,19 @@ class H3MultishotMemorySampler:
                            "identity-matched and correctly posed, so every "
                            "join inherits one consistent look."}),
             "guide_audio": ("AUDIO", {
-                "tooltip": "AUDIO SPINE (latent_handoff only): a continuous "
-                           "audio track for the WHOLE take, e.g. from a "
-                           "single low-res long pass. Each shot's audio "
-                           "stream is fully locked to its time-slice of "
-                           "this track at every sampling step; the video "
-                           "follows the locked audio (lips included) via "
-                           "the model's own audio-video attention. Every "
-                           "join then welds two copies of the same "
-                           "waveform - speech continuity by construction. "
-                           "Also the locked-audio music-video path."}),
+                "tooltip": "AUDIO SPINE: a continuous audio track for the "
+                           "WHOLE take - a voice recording, a song, or a "
+                           "low-res long pass. Each shot's audio stream is "
+                           "locked to its time-slice of this track at every "
+                           "sampling step; the video follows the locked "
+                           "audio (lips included) via the model's own "
+                           "audio-video attention. Works with EVERY "
+                           "continuity mode - the per-shot stride accounts "
+                           "for each mode's seam trim (render-verified on "
+                           "context_pin). Any sample rate: the track is "
+                           "resampled to the audio VAE's rate and mono is "
+                           "upmixed. This is the locked-audio music-video "
+                           "path."}),
             "sampler_name": (_sampler_names(), {"default": "res_multistep"}),
             "scheduler": (_scheduler_names(), {"default": "simple"}),
             "bank_pinned": ("INT", {
@@ -2533,15 +2564,14 @@ class H3MultishotMemorySampler:
                  "seamless_tail": _OV, "latent_handoff": _OV_HO,
                  "context_pin": 22}.get(continuity, 0)
         if guide_audio is not None:
-            _gwav = guide_audio["waveform"]
-            _gw3 = _gwav if _gwav.ndim == 3 else _gwav.unsqueeze(0)
+            _gw3, _g_sr = _wav_for_vae(audio_vae, guide_audio, "audio spine")
             _spine = audio_vae.encode(_gw3.movedim(1, -1)).detach()
             print("[H3Memory] audio spine: %d cols (%.1fs) - every shot's "
                   "audio is locked to a slice of it, so the VOICE cannot "
                   "change between shots (fl2va has no reference rows to "
                   "carry a voice; this is how you keep one performance)."
                   % (_spine.shape[-1],
-                     _gwav.shape[-1] / float(guide_audio["sample_rate"])),
+                     _gw3.shape[-1] / float(_g_sr)),
                   flush=True)
             if two_pass_upscale:
                 # the spine lock lives in a predict_noise patch built around

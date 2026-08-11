@@ -149,6 +149,22 @@ no Motion-Context → `continuity=first_frame`.
 
 ## New in v2.1.3
 
+- **The Audio Spine produced static with real-world audio files (ref2va,
+  user-reported).** The spine encoded `guide_audio` at whatever sample rate the
+  file arrived in, while the audio VAE expects its own rate (32 kHz) - the
+  native node resamples, the spine path did not. Nearly every real voice or
+  music file is 44.1/48 kHz, so the encoded latent was garbage, and because
+  the spine LOCKS the audio stream to that latent at every sampling step, the
+  render came out as noise. The same file worked through the native
+  `MiniMaxH3ReferenceToVideo` node, which is exactly what the reporter
+  observed. The spine now resamples to the VAE's rate and upmixes mono to
+  stereo, and the console says so. Measured: guide-to-output correlation went
+  from **0.06** (unrelated noise) to **0.97** on a 48 kHz voice track -
+  identical to a native-rate control. Also verified at 44.1 kHz mono.
+- **The spine's tooltip claimed `latent_handoff` only - wrong.** It works with
+  every continuity mode; the per-shot stride table has carried each mode's
+  seam trim all along, and the fix above was render-verified on `context_pin`.
+  This is the locked-audio music-video path, now documented as such.
 - **`two_pass_upscale` is removed.** It spatially interpolated the raw latent
   between passes. H3's latent is not a spatially smooth representation, so the
   interpolated values landed off-manifold and pass 2, running at low sigma, had
