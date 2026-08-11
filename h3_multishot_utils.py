@@ -109,6 +109,41 @@ def _write_shot_mp4(imgs, wav, sr, prefix, label, tag):
         return None
 
 
+def _upscale_frames(imgs, scale, model, tag):
+    """Enlarge decoded frames, AFTER sampling. Pixels, never latents.
+
+    The old two-pass path interpolated the raw latent between passes; H3's
+    latent is not spatially smooth, so that landed off-manifold and produced
+    colour noise no matter how the schedule was split. Anything done here is
+    downstream of the VAE, so it cannot leave the manifold - the worst case is
+    a soft picture, not a broken one.
+
+    Per shot, so peak memory is one shot's frames rather than the whole chain.
+    """
+    if model is None and (not scale or abs(scale - 1.0) < 1e-6):
+        return imgs
+    import comfy.utils
+    h, w = int(imgs.shape[1]), int(imgs.shape[2])
+    if model is not None:
+        from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+        imgs = ImageUpscaleWithModel().upscale(model, imgs)[0]
+        print("[%s] upscale: model %dx%d -> %dx%d" %
+              (tag, w, h, int(imgs.shape[2]), int(imgs.shape[1])), flush=True)
+        if scale and abs(scale - 1.0) > 1e-6:
+            # the model has a fixed factor; land on the size actually asked for
+            th, tw = int(round(h * scale)), int(round(w * scale))
+            x = imgs.movedim(-1, 1)
+            x = comfy.utils.common_upscale(x, tw, th, "lanczos", "disabled")
+            imgs = x.movedim(1, -1)
+            print("[%s] upscale: resized to %dx%d" % (tag, tw, th), flush=True)
+        return imgs
+    th, tw = int(round(h * scale)), int(round(w * scale))
+    x = imgs.movedim(-1, 1)
+    x = comfy.utils.common_upscale(x, tw, th, "lanczos", "disabled")
+    print("[%s] upscale: lanczos %dx%d -> %dx%d" % (tag, w, h, tw, th), flush=True)
+    return x.movedim(1, -1)
+
+
 def _smart_head_trim(wav, sr, trim, search_s=0.75):
     """Remove `trim` samples from a chained shot's audio HEAD, cutting at
     the QUIETEST spot in the first `search_s` seconds instead of blindly
@@ -1113,75 +1148,26 @@ class H3MultishotSampler:
                            "Write shot 1 so the character speaks a clean "
                            "solo line. An external voice_ref, if connected, "
                            "takes priority. Use with a ref2va checkpoint."}),
-            "two_pass_upscale": ("BOOLEAN", {
-                "default": False, "label_on": "low-res pass + upscale",
-                "label_off": "single pass",
-                "tooltip": "EVERY SHOT renders pass 1 at width/upscale_factor "
-                           "through pass1_fraction of the steps, the latent is "
-                           "spatially upscaled to the full width x height, and "
-                           "the remaining steps finish at full res. Faster than "
-                           "a native full-res render and sharper than rendering "
-                           "low-res alone. Needs the "
-                           "ComfyUI-MiniMaxH3_LatentUpscaler pack installed "
-                           "(github.com/Tr1dae) - its re-noise math is used."}),
-            "upscale_factor": ("FLOAT", {
-                "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.05,
-                "tooltip": "Pass-1 renders at width/factor x height/factor "
-                           "(snapped to /32). Pass 2 always lands EXACTLY on "
-                           "width x height."}),
-            "pass1_fraction": ("FLOAT", {
-                "default": 0.4, "min": 0.1, "max": 0.95, "step": 0.05,
-                "tooltip": "Share of the steps spent in the low-res pass. "
-                           "0.4 is RENDER-VERIFIED clean; splits much past "
-                           "~0.5 start pass 2 at too low a sigma to erase the "
-                           "latent-upscale interpolation pattern and the "
-                           "output grows a ghost/moire lattice (A/B'd at 0.7 "
-                           "vs 0.4, same seed)."}),
-            "upscale_audio_denoise": ("FLOAT", {
-                "default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05,
-                "tooltip": "How hard pass 2 may rewrite the audio. 0 = pass-1 "
-                           "audio is locked (safest for voice identity), 1 = "
-                           "full remix. 0.35 = light polish that preserves the "
-                           "voice."}),
-            "reference_image_size": (["match", "max"], {
-                "default": "match",
-                "tooltip": "Reference image sizing. 'match' scales each ref "
-                           "(down only, keeping aspect) to the generation's "
-                           "pixel area; 'max' uses the reference pipeline's "
-                           "2048px short edge for best identity fidelity. "
-                           "Reference tokens ride through every sampling "
-                           "step, so 'max' can be several times slower."}),
-            "preview_first_shot": ("BOOLEAN", {
-                "default": False, "label_on": "save shot 1 early",
-                "label_off": "off",
-                "tooltip": "Write shot 1 to output/video/H3_FIRSTSHOT/ the "
-                           "MOMENT it finishes decoding - minutes before the "
-                           "full chain completes - so a bad take can be "
-                           "cancelled early. The full path is printed to the "
-                           "console. The first_shot_frames/audio OUTPUTS "
-                           "always carry shot 1 regardless of this toggle."}),
-            "chain_gain_control": (
-                ["off", "flatten", "anchor_level", "match_output", "frozen_anchor"], {
-                "default": "off",
-                "tooltip": "Fixes SEAM SHARPENING in chained shots. Measured: "
-                           "each shot tail anchors the next, and the model "
-                           "returns ~1.25-1.47x the anchor texture energy, so "
-                           "sharpness RATCHETS (3.3x over 6 shots) with a "
-                           "visible step at every seam. "
-                           "flatten = RECOMMENDED. Levels every shot to the "
-                           "house texture level per block, so head == tail == "
-                           "house: no ratchet AND no step at the seam. Blur "
-                           "only, never sharpens. "
-                           "match_output = lighter: matches each shot head to "
-                           "the house level with one blanket blur (leaves the "
-                           "within-shot ramp, so a small seam step remains). "
-                           "anchor_level = pre-compensate the ANCHOR ONLY by "
-                           "the measured gain so each shot lands at shot 1 "
-                           "level; no output pixel is altered (the anchor "
-                           "frame is dropped from the master anyway). "
-                           "frozen_anchor = DIAGNOSTIC: every shot anchors on "
-                           "shot 1 tail; flattens the ratchet but identity may "
-                           "drift - use to prove the loop, not to ship."}),
+            "output_scale": ("FLOAT", {
+                "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
+                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
+                           "This is a lanczos resize of the finished frames, "
+                           "not a second diffusion pass: it adds resolution, "
+                           "not detail. It is applied per shot, so peak memory "
+                           "is one shot rather than the whole chain, and it "
+                           "works with EVERY continuity mode including "
+                           "context_pin, because it happens after sampling. "
+                           "The memory bank still stores base-resolution "
+                           "clips, so conditioning and VRAM are unchanged."}),
+            "upscale_model": ("UPSCALE_MODEL", {
+                "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
+                           "(ESRGAN and friends) to synthesise detail instead "
+                           "of merely resizing. Applied per shot after decode, "
+                           "at the model's own factor; if output_scale is also "
+                           "set, the result is resized to land exactly there. "
+                           "Slower than output_scale and it invents texture - "
+                           "on a chain, judge it on the LAST shot, where any "
+                           "texture ratchet is worst."}),
             "sigmas": ("SIGMAS", {
                 "tooltip": "Optional custom sigma schedule, replacing "
                            "sampler/scheduler + steps entirely. Some turbo "
@@ -1216,11 +1202,23 @@ class H3MultishotSampler:
             seed_per_shot=False, start_image=None, reference_images=None,
             voice_ref=None, sampler_name="res_multistep", scheduler="simple",
             sampler_override=None, scheduler_override=None,
-            self_anchor_voice=False, two_pass_upscale=False,
-            upscale_factor=1.5, pass1_fraction=0.4,
-            upscale_audio_denoise=0.35, reference_image_size="match",
+            self_anchor_voice=False, reference_image_size="match",
             preview_first_shot=False, chain_gain_control="off",
-            save_every_shot=False, sigmas=None):
+            save_every_shot=False, sigmas=None, output_scale=1.0,
+            upscale_model=None):
+        # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
+        # the raw latent between passes, and H3's latent is not a spatially
+        # smooth representation - interpolated values land off-manifold and
+        # pass 2, running at low sigma, has no room to pull them back. Three
+        # A/Bs at the previously documented recipe (14 steps, beta57) came
+        # back as colour-noise mush against clean single-pass controls, with
+        # shot 1 - which carries no pin at all - destroyed identically, so it
+        # was never about the chaining. Upscaling now happens AFTER decode
+        # (output_scale / upscale_model), where it cannot leave the manifold.
+        # The branches below are kept only so the diff stays readable; they
+        # are unreachable.
+        two_pass_upscale = False
+        upscale_factor, pass1_fraction, upscale_audio_denoise = 1.5, 0.4, 0.35
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -2263,40 +2261,26 @@ class H3MultishotMemorySampler:
                            "full chain completes - so a bad take can be "
                            "cancelled early. The full path is printed to the "
                            "console."}),
-            "two_pass_upscale": ("BOOLEAN", {
-                "default": False, "label_on": "low-res pass + upscale",
-                "label_off": "single pass",
-                "tooltip": "EVERY SHOT renders pass 1 at width/upscale_factor "
-                           "through pass1_fraction of the steps, the latent is "
-                           "spatially upscaled to the full width x height, and "
-                           "the remaining steps finish at full res. Needs the "
-                           "ComfyUI-MiniMaxH3_LatentUpscaler pack "
-                           "(github.com/Tr1dae). NOT compatible with "
-                           "continuity = context_pin or latent_handoff: those "
-                           "carry the previous shot's RAW latents across the "
-                           "join, and raw latents cannot be pinned into a "
-                           "pass-1 grid of a different size. The node stops "
-                           "with an error rather than silently dropping the "
-                           "join."}),
-            "upscale_factor": ("FLOAT", {
-                "default": 1.5, "min": 1.0, "max": 4.0, "step": 0.05,
-                "tooltip": "Pass-1 renders at width/factor x height/factor "
-                           "(snapped to /32). Pass 2 always lands EXACTLY on "
-                           "width x height."}),
-            "pass1_fraction": ("FLOAT", {
-                "default": 0.4, "min": 0.1, "max": 0.95, "step": 0.05,
-                "tooltip": "Share of the steps spent in the low-res pass. "
-                           "0.4 is RENDER-VERIFIED clean; splits much past "
-                           "~0.5 start pass 2 at too low a sigma to erase the "
-                           "latent-upscale interpolation pattern and the "
-                           "output grows a ghost/moire lattice (A/B'd at 0.7 "
-                           "vs 0.4, same seed)."}),
-            "upscale_audio_denoise": ("FLOAT", {
-                "default": 0.35, "min": 0.0, "max": 1.0, "step": 0.05,
-                "tooltip": "How hard pass 2 may rewrite the audio. 0 = pass-1 "
-                           "audio is locked (safest for voice identity), 1 = "
-                           "full remix. 0.35 = light polish that preserves the "
-                           "voice."}),
+            "output_scale": ("FLOAT", {
+                "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
+                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
+                           "This is a lanczos resize of the finished frames, "
+                           "not a second diffusion pass: it adds resolution, "
+                           "not detail. It is applied per shot, so peak memory "
+                           "is one shot rather than the whole chain, and it "
+                           "works with EVERY continuity mode including "
+                           "context_pin, because it happens after sampling. "
+                           "The memory bank still stores base-resolution "
+                           "clips, so conditioning and VRAM are unchanged."}),
+            "upscale_model": ("UPSCALE_MODEL", {
+                "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
+                           "(ESRGAN and friends) to synthesise detail instead "
+                           "of merely resizing. Applied per shot after decode, "
+                           "at the model's own factor; if output_scale is also "
+                           "set, the result is resized to land exactly there. "
+                           "Slower than output_scale and it invents texture - "
+                           "on a chain, judge it on the LAST shot, where any "
+                           "texture ratchet is worst."}),
             "sigmas": ("SIGMAS", {
                 "tooltip": "Optional custom sigma schedule, replacing "
                            "sampler/scheduler + steps entirely. Some turbo "
@@ -2320,8 +2304,24 @@ class H3MultishotMemorySampler:
                            "write per shot."}),
         }}
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT")
-    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
+    RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered",
+                    "video_latents", "audio_latents", "head_frames")
+    OUTPUT_TOOLTIPS = (
+        "The joined master, seams trimmed.",
+        "Master audio.",
+        "How many shots rendered.",
+        "Every shot's video latent EXACTLY as sampled, batched along dim 0 "
+        "(one entry per shot), UNTRIMMED. Shots after the first open with "
+        "head_frames of replayed material from the previous shot's tail - "
+        "that is what makes the join seamless, and it is removed at decode, "
+        "not in the latent. So this does NOT line up with master_frames "
+        "until you trim it yourself. Latent temporal rows for F frames are "
+        "5*((F-5)//17)+2.",
+        "The matching audio latent per shot, same batching, same caveat.",
+        "Frames of replayed head carried by every shot AFTER the first "
+        "(0 for shot 1, and 0 for continuity modes that do not pin). Trim "
+        "this many frames off the front of each later shot after you decode.")
     FUNCTION = "run"
     CATEGORY = "sampling/minimax"
 
@@ -2337,10 +2337,22 @@ class H3MultishotMemorySampler:
             keyframe_images=None, reference_images=None, voice_ref=None,
             sampler_override=None, scheduler_override=None,
             self_anchor_voice=False, reference_image_size="match",
-            preview_first_shot=False, two_pass_upscale=False,
-            upscale_factor=1.5, pass1_fraction=0.4,
-            upscale_audio_denoise=0.35, save_every_shot=False,
-            sigmas=None):
+            preview_first_shot=False,
+            save_every_shot=False, sigmas=None, output_scale=1.0,
+            upscale_model=None):
+        # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
+        # the raw latent between passes, and H3's latent is not a spatially
+        # smooth representation - interpolated values land off-manifold and
+        # pass 2, running at low sigma, has no room to pull them back. Three
+        # A/Bs at the previously documented recipe (14 steps, beta57) came
+        # back as colour-noise mush against clean single-pass controls, with
+        # shot 1 - which carries no pin at all - destroyed identically, so it
+        # was never about the chaining. Upscaling now happens AFTER decode
+        # (output_scale / upscale_model), where it cannot leave the manifold.
+        # The branches below are kept only so the diff stays readable; they
+        # are unreachable.
+        two_pass_upscale = False
+        upscale_factor, pass1_fraction, upscale_audio_denoise = 1.5, 0.4, 0.35
         if sampler_override and str(sampler_override).strip():
             sampler_name = str(sampler_override).strip()
         if scheduler_override and str(scheduler_override).strip():
@@ -2434,16 +2446,17 @@ class H3MultishotMemorySampler:
         # is the entire reason those modes exist. Refuse rather than degrade.
         _tp_tr = _tp_w1 = _tp_h1 = _tp_sig_hi = _tp_sig_lo = None
         _tp_lat_th = _tp_lat_tw = None
+        _tp_lat_h1 = _tp_lat_w1 = None   # pass-1 latent grid (pin target)
         if two_pass_upscale:
-            if continuity in ("context_pin", "latent_handoff"):
+            if continuity == "latent_handoff":
                 raise ValueError(
                     "two_pass_upscale is not compatible with continuity="
-                    f"'{continuity}'. That mode carries the previous shot's "
-                    "RAW latents across the join, and they cannot be pinned "
-                    "into a pass-1 grid of a different size. Either turn "
-                    "two_pass_upscale off, or use a continuity mode that "
-                    "hands off through pixels (first_frame, flf_chain, "
-                    "seamless) or through the bank alone (cut).")
+                    "'latent_handoff'. That mode renoises the previous tail "
+                    "into the CURRENT trajectory at every step, and a "
+                    "two-pass render is two trajectories - the handoff would "
+                    "be dropped halfway. Use continuity=context_pin, which "
+                    "does support two_pass_upscale (the pin is resampled "
+                    "onto the pass-1 grid), or turn two_pass_upscale off.")
             _tp_tr = _load_upscaler_utils()
             _f = max(1.0, float(upscale_factor))
             _tp_w1 = max(32, int(round(width / _f / 32)) * 32)
@@ -2484,6 +2497,7 @@ class H3MultishotMemorySampler:
 
         bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
         frames_parts, audio_parts = [], []
+        _lat_v_parts, _lat_a_parts = [], []   # issue #12: raw per-shot latents
         sr = None
         _cg_ref = None
         _CG_WIN = 24
@@ -2553,6 +2567,9 @@ class H3MultishotMemorySampler:
             if two_pass_upscale:
                 latent, frame_count = mmh3._empty_av_latent(
                     _tp_w1, _tp_h1, frames_per_shot)
+                _p1v, _p1n = _tp_tr.extract_tensor(latent["samples"])
+                _tp_lat_h1 = int(_p1v[0].shape[-2])
+                _tp_lat_w1 = int(_p1v[0].shape[-1])
             else:
                 latent, frame_count = mmh3._empty_av_latent(width, height,
                                                             frames_per_shot)
@@ -2865,10 +2882,25 @@ class H3MultishotMemorySampler:
                            if _fork else
                            " If you installed a fork instead, note that forks "
                            "may leave that node id to upstream on purpose."))
+                # The pin is raw latents from the PREVIOUS shot, sampled at
+                # full resolution. Pass 1 runs on a smaller grid, so the pin
+                # has to be resampled onto that grid or the shapes simply do
+                # not meet - which is what used to make this combination an
+                # error. Pass 2 is unpinned by construction (cond_hi is
+                # snapshotted before this line), so it inherits the seam
+                # through the upscaled pass-1 latent rather than re-deriving
+                # it, and never sees a pin at the wrong size.
+                _pin_src = _cp_prev
+                if two_pass_upscale and _cp_prev is not None:
+                    _pin_src = _upscale_av_exact(_tp_tr, _cp_prev,
+                                                 _tp_lat_h1, _tp_lat_w1)
+                    print("[H3Memory] two-pass: pin resampled to the pass-1 "
+                          "grid (%dx%d latent)" % (_tp_lat_h1, _tp_lat_w1),
+                          flush=True)
                 cond, _cp_trim = _mc_cls().apply(
                     conditioning=cond, vae=video_vae, latent=latent,
                     context_length="22", audio_context_length=22,
-                    context_latent=_cp_prev)
+                    context_latent=_pin_src)
                 print("[H3Memory] context_pin: previous shot's tail pinned "
                       "as raw latents (22f video + 22f audio ref, trim %d "
                       "on decode)" % _cp_trim, flush=True)
@@ -3102,6 +3134,12 @@ class H3MultishotMemorySampler:
                 _comps = lat.unbind()
                 _a_lat = _comps[1] if len(_comps) > 1 else None
                 lat = _comps[0]
+            # issue #12: keep each shot's latent exactly as sampled. Trimming
+            # here would be throwing the pin material away on the user's
+            # behalf, and the pin is the part that cannot be recovered later.
+            _lat_v_parts.append(lat.detach().cpu())
+            if _a_lat is not None:
+                _lat_a_parts.append(_a_lat.detach().cpu())
             if continuity == "latent_handoff":
                 _ho_taper_src = (lat[:, :, -1:].detach().clone()
                                  if handoff_taper > 0 else None)
@@ -3246,18 +3284,6 @@ class H3MultishotMemorySampler:
                 print("[H3Memory] self-anchor: shot 1's voice (%.1fs) is now "
                       "<Audio 1> for the remaining %d shot(s)."
                       % (_aw.shape[-1] / sr, n - 1), flush=True)
-            if si == 0 and preview_first_shot:
-                # write shot 1 NOW - minutes before the chain finishes - so a
-                # bad take can be cancelled instead of waited out
-                _write_shot_mp4(imgs, wav, sr,
-                                "video/H3_FIRSTSHOT/firstshot",
-                                "FIRST-SHOT PREVIEW saved", "H3Memory")
-            if save_every_shot:
-                # before the seam trim: this file is the shot as rendered, so
-                # a chain that dies at the mux can still be joined by hand
-                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
-                                f"shot {si + 1}/{n} saved", "H3Memory")
-
             # store this shot as a bank slot: centre clip + the audio under it
             clip_imgs, clip_start = _jb_centre_clip(imgs, bank_clip_frames)
             if bank_ref_noise > 0:
@@ -3274,6 +3300,26 @@ class H3MultishotMemorySampler:
             bank.add((clip_imgs.clone(),
                       _jb_audio_window(wav, sr, clip_start,
                                        clip_imgs.shape[0])))
+
+            # Upscale AFTER the bank has taken its clip: the bank must keep
+            # base-resolution reference clips or the conditioning payload -
+            # and the VRAM it costs - grows with output_scale for no gain.
+            # Downstream of the VAE, so unlike the old two-pass path this
+            # cannot leave the latent manifold. Frame COUNT is untouched, so
+            # every seam-trim index below still means what it meant.
+            imgs = _upscale_frames(imgs, output_scale, upscale_model,
+                                   "H3Memory")
+            if si == 0 and preview_first_shot:
+                # shot 1 as early as possible, so a bad take can be cancelled
+                # instead of waited out
+                _write_shot_mp4(imgs, wav, sr,
+                                "video/H3_FIRSTSHOT/firstshot",
+                                "FIRST-SHOT PREVIEW saved", "H3Memory")
+            if save_every_shot:
+                # before the seam trim, so consecutive files overlap ~1s - a
+                # chain that dies at the mux can still be joined by hand
+                _write_shot_mp4(imgs, wav, sr, "video/H3_SHOTS/shot",
+                                f"shot {si + 1}/{n} saved", "H3Memory")
 
             _tail_n = _OV_HO if continuity == "latent_handoff" else _OV
             last_tail = imgs[-max(_tail_n, 1):].clone()
@@ -3444,6 +3490,29 @@ class H3MultishotMemorySampler:
                   + "/".join("%.2f" % v for v in _before) + "  after "
                   + "/".join("%.2f" % v for v in _after), flush=True)
 
+        # issue #12: batch the raw per-shot latents along dim 0. Shapes match
+        # when every shot shares one grid, which is the normal case; if a run
+        # ever mixes grids the batch is impossible, and saying so beats
+        # returning something that silently is not what it claims to be.
+        def _batch_latents(parts, what):
+            if not parts:
+                return {"samples": torch.zeros(0)}
+            shapes = {tuple(x.shape[1:]) for x in parts}
+            if len(shapes) > 1:
+                print(f"[H3Memory] {what}: shots do not share a grid "
+                      f"({sorted(shapes)}) - returning shot 1 only.",
+                      flush=True)
+                return {"samples": parts[0]}
+            return {"samples": torch.cat(parts, dim=0)}
+
+        _lat_v = _batch_latents(_lat_v_parts, "video_latents")
+        _lat_a = _batch_latents(_lat_a_parts, "audio_latents")
+        print("[H3Memory] latents out: video %s, audio %s, head_frames=%d "
+              "(UNTRIMMED - shots 2+ open with the replayed head)"
+              % (tuple(_lat_v["samples"].shape),
+                 tuple(_lat_a["samples"].shape) if _lat_a_parts else "none",
+                 _cp_trim), flush=True)
+
         master = torch.cat(frames_parts, dim=0)
         # always the short 40ms weld: a long crossfade CONSUMES its overlap,
         # which shortened audio 375ms per join and walked lip sync off from
@@ -3451,7 +3520,8 @@ class H3MultishotMemorySampler:
         waveform = _xfade_audio(audio_parts, sr, ms=40)
         print(f"[H3Memory] done: {n} shots, {master.shape[0]} frames "
               f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
-        return (master, {"waveform": waveform, "sample_rate": sr}, n)
+        return (master, {"waveform": waveform, "sample_rate": sr}, n,
+                _lat_v, _lat_a, int(_cp_trim))
 
 class H3OptionalImage:
     """An on/off gate for an OPTIONAL image input.

@@ -94,25 +94,25 @@ switch is lazy, so the branch you are not using never executes.
 | `voice_ref` | unwired | A clean solo speech clip, carried into every shot as `<Audio 1>`, pinning the voice. |
 | `self_anchor_voice` | **`on`** (needs `ref2va`) | Shot 1's *own rendered voice* becomes the reference for every later shot — no file needed. Write shot 1 with a clean solo line. Needs a ref2va checkpoint; a wired `voice_ref` takes priority. Note it enlarges the activation pool on every shot after the first. |
 
-### Two-pass upscale
+### Upscaling
+
+Upscaling happens **after decode**, per shot. That is deliberate: the previous
+`two_pass_upscale` interpolated the raw latent between passes, and H3's latent is
+not a spatially smooth representation - interpolated values land off-manifold and
+the second pass, running at low sigma, cannot pull them back. It produced colour
+noise on every configuration tested, including the one this file used to call
+render-verified. It is gone.
 
 | Dial | Default | What it does |
 |---|---|---|
-| `two_pass_upscale` | `off` | Renders each shot low-res through part of the steps, upscales in latent space, finishes at full resolution. Faster than native full-res, sharper than low-res alone. Needs the H3 latent-upscaler pack. **Not combinable with `continuity = context_pin` or `latent_handoff`, or with an audio spine** — see below. |
-| `upscale_factor` | `1.5` | Pass 1 renders at size ÷ factor, snapped to /32. Pass 2 always lands exactly on the target size. |
-| `pass1_fraction` | `0.4` | Share of steps spent low-res. **0.4 is verified clean.** Past roughly 0.5, pass 2 starts at too low a sigma to erase the latent-upscale interpolation pattern and the output grows a ghost/moiré lattice. |
-| `upscale_audio_denoise` | `0.35` | How much pass 2 may rewrite the audio. `0` locks pass-1 audio (safest for voice identity), `1` is a full remix. |
+| `output_scale` | `1.0` (off) | Lanczos resize of each shot's finished frames. Adds resolution, **not** detail. Works with every continuity mode including `context_pin`, because it is downstream of the VAE. Measured: rendering at 448x256 with `output_scale 1.5` reached 672x384 in 45.5s against 80.9s rendering 672x384 natively - **1.78x faster, and visibly softer**; concrete pore texture that survives a native render washes out. Use it when the clock matters, or when the whole-chain upscale would not fit in memory; render native when texture matters. |
+| `upscale_model` | unwired | Optional `UPSCALE_MODEL` link (ComfyUI's Load Upscale Model - ESRGAN and friends) to synthesise detail rather than resize. Applied per shot at the model's own factor; combine with `output_scale` to land on an exact size. **Not render-verified** - no upscale model was installed on the test rig. |
 
-**Why two-pass and the strongest joins exclude each other.** `context_pin` and
-`latent_handoff` carry the previous shot's *raw latents* into this shot's grid.
-Pass 1 runs on a smaller grid, so those latents do not fit — and resampling
-them would destroy the bit-identical hand-off that is the entire reason the
-mode exists. An audio spine is excluded for a different reason: the spine holds
-audio still through every step of *one* denoise trajectory, and a two-pass
-render is two trajectories, so half the audio would sample unlocked. In all
-three cases the node stops with an error naming the conflict rather than
-quietly producing a weaker join. Two-pass is available on `cut`, `seamless`,
-`seamless_tail`, `first_frame` and `flf_chain`.
+Both are applied **per shot**, after the memory bank has taken its
+base-resolution reference clip. That keeps the conditioning payload and its VRAM
+identical to an un-upscaled run, and means a long chain never holds a full
+upscaled master in memory at once - which is the failure that cost one user a
+three-hour render (issue #13).
 
 ### Workflow
 

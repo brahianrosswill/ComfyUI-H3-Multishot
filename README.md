@@ -147,6 +147,44 @@ no Motion-Context → `continuity=first_frame`.
 
 ---
 
+## New in v2.1.3
+
+- **`two_pass_upscale` is removed.** It spatially interpolated the raw latent
+  between passes. H3's latent is not a spatially smooth representation, so the
+  interpolated values landed off-manifold and pass 2, running at low sigma, had
+  no room to pull them back. Every arm tested came back as colour-noise mush
+  against clean single-pass controls - including at 14 steps / `beta57`, the
+  recipe `SETTINGS.md` previously called render-verified, and including shot 1,
+  which carries no pin at all. It was never a `context_pin` incompatibility;
+  it did not work in any mode. The guard around it is gone with it.
+- **`output_scale`** replaces it: a lanczos resize of each shot's finished
+  frames, after decode, so it cannot leave the latent manifold and works with
+  every continuity mode. It adds resolution, not detail - measured at
+  **1.78x faster** than rendering the same output size natively (45.5s vs
+  80.9s at 672x384) and visibly softer. Applied **per shot**, so a long chain
+  never holds a full upscaled master in memory at once.
+- **`upscale_model`**: optional `UPSCALE_MODEL` input for real detail synthesis
+  (ESRGAN and friends via ComfyUI's own loader), per shot, at the model's own
+  factor. **Implemented but not render-verified** - no upscale model was
+  installed on the test rig.
+- **`video_latents` / `audio_latents` / `head_frames` outputs** on the memory
+  sampler (issue #12). Every shot's latent exactly as sampled, batched along
+  dim 0, untrimmed. Shots after the first open with `head_frames` of replayed
+  material that is only removed at decode, so they do not line up with the
+  master until you trim it - the outputs are deliberately raw rather than
+  trimmed on your behalf, because the pin material cannot be recovered later.
+  Verified: 124-frame shots return 37 latent rows (`5*((F-5)//17)+2`), and
+  124 + 124 - 22 is exactly the 226-frame master.
+
+Both upscales are applied after the memory bank has taken its base-resolution
+reference clip, so conditioning and VRAM are unchanged from an un-upscaled run,
+and the returned latents stay base-resolution.
+
+**If you saved your own copy of a v2.1.2 graph**, reload the shipped workflow:
+removing four widgets shifts the saved widget order on that node.
+
+---
+
 ## Fixed in v2.1.2
 
 All four of these are in the writer half of the pack
