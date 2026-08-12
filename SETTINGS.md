@@ -106,7 +106,7 @@ render-verified. It is gone.
 | Dial | Default | What it does |
 |---|---|---|
 | `output_scale` | `1.0` (off) | Lanczos resize of each shot's finished frames. Adds resolution, **not** detail. Works with every continuity mode including `context_pin`, because it is downstream of the VAE. Measured: rendering at 448x256 with `output_scale 1.5` reached 672x384 in 45.5s against 80.9s rendering 672x384 natively - **1.78x faster, and visibly softer**; concrete pore texture that survives a native render washes out. Use it when the clock matters, or when the whole-chain upscale would not fit in memory; render native when texture matters. |
-| `upscale_model` | unwired | Optional `UPSCALE_MODEL` link (ComfyUI's Load Upscale Model - ESRGAN and friends) to synthesise detail rather than resize. Applied per shot at the model's own factor; combine with `output_scale` to land on an exact size. **Not render-verified** - no upscale model was installed on the test rig. |
+| `upscale_model` | unwired | Optional `UPSCALE_MODEL` link (ComfyUI's Load Upscale Model - ESRGAN and friends) to synthesise detail rather than resize. Applied per shot at the model's own factor; combine with `output_scale` to land on an exact size. Render-verified with RealESRGAN x2plus (448x256 -> 896x512, and combined with `output_scale` landing exactly on 672x384). |
 
 Both are applied **per shot**, after the memory bank has taken its
 base-resolution reference clip. That keeps the conditioning payload and its VRAM

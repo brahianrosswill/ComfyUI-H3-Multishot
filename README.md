@@ -204,8 +204,8 @@ no Motion-Context → `continuity=first_frame`.
   never holds a full upscaled master in memory at once.
 - **`upscale_model`**: optional `UPSCALE_MODEL` input for real detail synthesis
   (ESRGAN and friends via ComfyUI's own loader), per shot, at the model's own
-  factor. **Implemented but not render-verified** - no upscale model was
-  installed on the test rig.
+  factor. Render-verified with RealESRGAN x2plus: 448x256 -> 896x512, and
+  combined with `output_scale` it lands exactly on the requested size.
 - **`video_latents` / `audio_latents` / `head_frames` outputs** on the memory
   sampler (issue #12). Every shot's latent exactly as sampled, batched along
   dim 0, untrimmed. Shots after the first open with `head_frames` of replayed
@@ -482,10 +482,8 @@ This is also why `seed_per_shot` should stay ON - see the settings table.
 | `color_level` | `off` | `off` / `mvgd` / `scene`. Levels each shot's colour and exposure statistics to shot 1's *settled tail* - a fixed reference, because matching each shot to its neighbour re-accumulates drift. Not needed when chaining by latents; reach for it if a long chain drifts warm or cool. |
 | `self_anchor_voice` | - | Feeds shot 1's own rendered audio forward as the voice reference for later shots, so the voice identity established in shot 1 is what later shots match. |
 | `voice_ref` | - | An external audio clip used as the voice reference instead. |
-| `two_pass_upscale` | `OFF` | Enables the two-pass upscale path. **Not combinable with `continuity = context_pin` or `latent_handoff`, or with an audio spine** - those carry the previous shot's raw latents, or one locked denoise trajectory, across the join and a two-pass render preserves neither; the node errors instead of weakening the join. Available on `cut`, `seamless`, `seamless_tail`, `first_frame`, `flf_chain`. |
-| `upscale_factor` | - | Upscale multiplier for pass 2. |
-| `pass1_fraction` | `0.4` | Fraction of the step schedule spent in pass 1. **0.4 is the verified value.** Past roughly 0.5 a ghost/moire lattice appears in the output. |
-| `upscale_audio_denoise` | - | Denoise applied on the audio lane during the upscale pass. |
+| `output_scale` | `1.0` (off) | Lanczos resize of each shot's finished frames, AFTER decode - resolution, not detail. Works with every continuity mode including `context_pin`. Applied per shot and after the bank takes its clip, so conditioning and VRAM are unchanged and a long chain never holds a full upscaled master in memory. Measured 1.78x faster than rendering the same output size natively, and visibly softer. |
+| `upscale_model` | unwired | Optional `UPSCALE_MODEL` link (ComfyUI's Load Upscale Model - ESRGAN and friends). This one *synthesizes* detail rather than resizing. Per shot, at the model's own factor; combine with `output_scale` to land on an exact size. Its invented texture never reaches the memory bank, so it cannot feed the sharpening ratchet. |
 | `reference_image_size` | - | `match` (use the render resolution) or `max`. |
 | `preview_first_shot` | `ON` | Surfaces shot 1 as soon as it finishes so you can check framing and voice before the rest of the chain renders. |
 
