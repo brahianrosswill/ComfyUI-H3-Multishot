@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.5 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.6 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -119,88 +119,91 @@ no Motion-Context → `continuity=first_frame`.
 
 ---
 
-## New in v2.1.5
+## New in v2.1.6
 
-**The texture ratchet under `context_pin` is fixed.** Chained shots got
-progressively sharper - detail accreting on detail, once per hop - and none of
-the three dials that were supposed to prevent it were reaching the cause.
+**Chained shots stop getting brighter-edged every hop.** Not by the route
+2.1.5 claimed - see the correction below.
 
-Measured, 4 shots x 243f, two seeds, base resolution (no upscaler in the loop),
-texture = variance of a Laplacian on a fixed proxy so sizes stay comparable:
+`master_normalize` matched every frame's MEAN to one global target, which is
+why a chain shows no brightness step. It was also masking a second drift it
+never touched. Measured on a 3-shot chain at 960x544: mean held flat, 27.31 ->
+27.43, while the DISTRIBUTION stretched - p25 fell 6 -> 2 and p95 rose 85 -> 96.
+Contrast climbing every hop, re-centred each time, and handed to the next shot
+as a higher-contrast starting point.
 
-| `pin_noise` | seed A per hop | seed B per hop |
-|---|---|---|
-| 0.00 (old behaviour) | 1.043 | 1.100 |
-| 0.02 | 1.046 | - |
-| 0.04 | 1.030 | 1.065 |
-| **0.05 (new default)** | **1.012** | **1.015** |
+**New: `master_normalize=luma+contrast`** (now the default) matches the spread
+as well as the mean. Rescaling amplitude about each frame's own mean is an
+affine remap: it moves no edges, so it is not the blur this pack has always
+ruled out for texture drift.
 
-1.000 means no accretion at all. Both chains still read as a single continuous
-take to a blind reviewer, every line of dialogue intact, and 1:1 crops of the
-last shot show no loss of real detail - corduroy wale, spectacle frames and
-chair studs all survive. What goes away is the invented crispness.
+Texture growth per hop, from a log fit across all shots. 1.000 is no accretion:
 
-- **`pin_noise` (new, default 0.05).** Mixes seeded noise into the pinned
-  latent before it conditions the next shot. Under `context_pin` the pin *is*
-  the carrier: it is the model's own output, and left pristine the model treats
-  it as ground truth and sharpens on top of it every hop. This is the same
-  noised-clean-condition idea the pack already used elsewhere, finally aimed at
-  the right target. The pin is an AV `NestedTensor`; only the video half is
-  noised, because noising the audio reference dulls the voice.
-  Response is sharply non-linear - 0.02 does nothing, 0.04 removes about a
-  third. Set `0` for the pre-2.1.5 behaviour.
-- **`pin_frames` (new, default 22).** The pin length, previously hard-coded.
-  Options are the only latent-aligned values the Motion-Context node accepts:
-  22 / 5 / 39 / 56. Longer pins also cut the ratchet (39 gave 1.017 per hop)
-  but the head trim scales with them, so 39 frames of audio are cut per join
-  instead of 22 - a blind review of that arm caught a jump at the third join
-  and a line clipped from *"So it stays in the drawer"* to *"...is in the
-  drawer"*. Leave it at 22 and use `pin_noise` instead.
+| where | `luma` | `luma+contrast` | contrast spread |
+|---|---|---|---|
+| 960x544, in-render, 124f x 4 | 1.126 | **1.047** | 11.2% -> 0.3% |
+| 960x544, 243f x 3 | 1.199 | **1.064** | 12.2% -> 0.4% |
+| 640x352, 243f x 3 | 1.130 | **1.055** | 7.0% -> 0.2% |
 
-### Three dials that were doing nothing under `context_pin`
+The baseline ratchet scales with canvas (1.130 at 640x352, 1.199 at 960x544);
+after normalising it stops caring (1.055 vs 1.064). There is nothing in it to
+tune per resolution - it works on decoded frames with per-frame statistics
+against one global target.
 
-Verified from source, not inferred. If you had these set, they were inert:
+The target anchors to **shot 1**, not the timeline median. Contrast only
+ratchets upward, so shot 1 is the one frame-set with nothing accreted onto it;
+a median target pulls shot 1 UP to meet the drift (+11.7% texture, for no
+benefit) where anchoring to shot 1 leaves it untouched (+0.1%) and only ever
+pulls later shots down.
 
-- `join_anchor_noise` - noises **keyframe** latents. `context_pin` has no join
-  keyframes.
-- `handoff_release` - belongs to the `latent_handoff` path only.
-- `bank_ref_noise` - reaches the bank's reference images, which measurement
-  shows are not the carrier (0.02 and 0.05 gave 1.032 and 1.039 against a
-  1.043 baseline - inside the noise). It does help *in combination* with
-  `pin_noise`, but `pin_noise=0.05` alone gets further on one dial.
+1:1 crops of the last shot show no loss of real detail - lamp vent slots, hinge
+rivets, hair strands and knit weave all survive. What leaves is the invented
+crispness.
 
-### The per-shot upscaler is not the cause
+### What is left, honestly
 
-`output_scale` / `upscale_model_name` run once per shot, but the memory bank
-takes its reference clip before the upscale and the pin comes from upstream of
-the VAE, so the upscaler cannot feed anything forward. Running the identical
-ESRGAN+lanczos path offline over the same frames put its contribution at about
-a sixth of the end-to-end spread (+12.6% base becoming +15.0% upscaled). Real,
-but a minority share - and now largely moot, since the thing it was amplifying
-is gone.
+About **1.05 per hop**. That residual is spatial accretion, and this pass
+cannot reach it: `master_normalize` runs on the finished master, outside the
+feedback loop, so it cleans what you see while the next shot is still handed
+the inflated pin. Four shots is slight. Ten shots is roughly +50%. If you are
+chaining long, expect it.
 
-### Framing that changes once, at the first join only
+### Correction to v2.1.5
 
-Not a bug, and not fixable with a setting: shot 1 is the only shot with nothing
-pinned behind it, so it is the only one whose composition can disagree with the
-text. A prop whose size and screen position are not stated will be re-imagined
-when shot 2 inherits the pin. In one 5-shot render a table lamp grew 3.8x and
-slid over ~1.7s starting exactly at the first seam, then held for the remaining
-37 seconds. Writing *"the shade is level with his shoulder and stands about one
-third the height of the frame"* into the scene block removed it entirely across
-six arms (<=1.4% area, <=0.2px centroid).
+v2.1.5 said `pin_noise=0.05` fixed this. **It does not.** That was measured on
+two seeds of a single scene at 640x352 - a scene whose background was nearly
+black and which barely ratcheted to begin with - and the control that would
+have caught it, `pin_noise=0.00` at the reporting user's own resolution, had
+never been run. With it run:
 
-**Name the size and screen position of any prop that sits at the frame edge, in
-every shot's scene block.**
+| canvas | 0.00 | 0.05 | change |
+|---|---|---|---|
+| 640x352 | 1.131 | 1.111 | -1.8% |
+| 960x544 | 1.211 | 1.201 | -0.9% |
 
-### A note on run-to-run variance
+Both on a detail-heavy scene. The dial is small and scene-dependent, it cannot
+touch the dominant drift in a busy frame, and above 0.10 it gets **worse** (0.20
+measured 1.228 against a 1.211 control). Its range now stops at 0.10 and its
+tooltip says all of this. It stays in the pack because it costs nothing and
+does help where the ratchet is already small; it is not the fix.
 
-H3's int8/GGUF kernels are not bit-deterministic: two renders with identical
-inputs differ by ~0.8-1.4 mean absolute levels out of 255, and per-shot texture
-carries 0.7-3.3% run-to-run noise. Baseline ratchet severity is also strongly
-seed-dependent (1.043 vs 1.100 per hop, same script and settings). Single-render
-A/Bs of small effects here are not trustworthy; the numbers above are two seeds
-with a log-linear fit across all four shots rather than an endpoint ratio.
+### Not tested
+
+Portrait canvases. Everything above is landscape - 640x352 and 960x544. The
+mechanism is resolution-independent by construction and the two landscape sizes
+agree, but 768x1344 and 736x1280 have not been measured and are not claimed.
+
+### Measuring this yourself
+
+Texture comparisons are only meaningful **while the framing holds**. If the
+model cuts to a different setup, texture reflects content and the number is
+meaningless - one portrait run here scored a flattering 0.878 per hop purely
+because shot 3 cut to a close-up of a film reel. Correlate each shot's mean
+frame against shot 1's before trusting any of it; a held framing sits above
+0.95.
+
+That cut is worth a writing rule of its own: **do not name a nearby object in a
+shot's closing beat.** *"She glances down at the reel"* reads as a request for
+a shot of the reel. Keep closing beats on the speaker's own body.
 
 ---
 

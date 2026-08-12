@@ -2565,7 +2565,7 @@ class H3MultishotMemorySampler:
                            "Reads models/upscale_models/, the same folder "
                            "ComfyUI's own Load Upscale Model reads."}),
             "master_normalize": (["off", "luma", "luma+contrast"], {
-                "default": "off",
+                "default": "luma+contrast",
                 "tooltip": "Deflicker the FINISHED chain: every frame driven "
                            "to ONE global luma target, after the master "
                            "exists. Per-shot correction cannot work here - it "
@@ -2595,7 +2595,7 @@ class H3MultishotMemorySampler:
                            "framing can disagree with the text. All four values "
                            "are latent-aligned; arbitrary numbers are not."}),
             "pin_noise": ("FLOAT", {
-                "default": 0.05, "min": 0.0, "max": 0.30, "step": 0.005,
+                "default": 0.05, "min": 0.0, "max": 0.10, "step": 0.005,
                 "tooltip": "context_pin only: mix this much seeded noise into "
                            "the PINNED LATENT before it conditions the next "
                            "shot. Same noised-clean-condition idea as "
@@ -2605,15 +2605,16 @@ class H3MultishotMemorySampler:
                            "latent pin, and neither join_anchor_noise "
                            "(keyframes only) nor bank_ref_noise (bank images) "
                            "touches it. "
-                           "0.05 is the shipped default and the measured "
-                           "setting: across two seeds it took texture growth "
-                           "from 1.043 and 1.100 per hop down to 1.012 and "
-                           "1.015 - the ratchet essentially gone - with both "
-                           "chains still reading as one continuous take and "
-                           "no loss of real detail at 1:1. The response is "
-                           "sharply non-linear: 0.02 does nothing at all, "
-                           "0.04 removes about a third. Set 0 to restore the "
-                           "pre-2.1.5 behaviour. "
+                           "Small, and scene-dependent: measured -1.8% per hop at "
+                           "640x352 and -0.9% at 960x544 on a "
+                           "detail-heavy scene, against much larger "
+                           "gains on a scene that barely ratcheted at "
+                           "all. It cannot touch the dominant drift in a "
+                           "busy frame - master_normalize=luma+contrast "
+                           "is what does that. Above 0.10 it gets WORSE "
+                           "(0.20 measured 1.228 against a 1.211 "
+                           "control), which is why the range stops "
+                           "there. Set 0 to disable. "
                            "The noised latent conditions the next shot but "
                            "never reaches the final cut."}),
         }}
