@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.0 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.4 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -76,30 +76,20 @@ Download links are in [Models](#models).
 
 **3. Restart ComfyUI and load the workflow**
 
-```
-MiniMax-H3_Seamless_Chain_v2.0.zip
-ComfyUI-H3-Multishot/LICENSE
-ComfyUI-H3-Multishot/README.md
-ComfyUI-H3-Multishot/__init__.py               defensive loader
-ComfyUI-H3-Multishot/apply_gguf_arch_patch.py  on-disk GGUF arch fallback
-ComfyUI-H3-Multishot/h3_advanced.py            advanced sampling helpers
-ComfyUI-H3-Multishot/h3_avbank_probe.py        AV bank diagnostics
-ComfyUI-H3-Multishot/h3_cartridge.py           portable character cartridges
-ComfyUI-H3-Multishot/h3_episode_tools.py       StudioControls, StudioSwitches, AnySwitch
-ComfyUI-H3-Multishot/h3_gguf_arch.py           teaches ComfyUI-GGUF the minimax_h3 arch
-ComfyUI-H3-Multishot/h3_interior_patch.py      interior anchors (stands down for Motion Context)
-ComfyUI-H3-Multishot/h3_keyframes.py           keyframe anchor nodes
-ComfyUI-H3-Multishot/h3_lora_stack.py          H3LoraStack
-ComfyUI-H3-Multishot/h3_multishot_utils.py     samplers, loaders, gates
-ComfyUI-H3-Multishot/h3_ref_folder.py          reference-folder picker
-INSTALL.md
-PROMPTING.md
-SETTINGS.md
-example_script.txt                             worked four-shot two-hander
-workflows/H3_Keyframes.json                    single-clip keyframe anchoring
-workflows/H3_Seamless_Chain_CORE.json          same job, zero third-party packs
-workflows/H3_Seamless_Chain_v2.json            everything, optional lanes gated off
-```
+Copy **both** node folders from the zip into `ComfyUI/custom_nodes/`,
+restart, then load a workflow from the workflow menu. The full contents
+are listed under [Files in the release zip](#files-in-the-release-zip).
+
+**Three workflows, one reason each.** `v2` is everything with the optional
+lanes gated off. `CORE` does the same job with zero third-party packs - start
+there if you want a render before installing anything else. `Keyframes` is a
+different job: a hand-built sampling graph for anchoring a single clip at
+chosen frame positions with per-anchor condition strength, not multishot.
+
+`H3_Multishot_AIO` and `H3_Multishot_MEMORY` from earlier versions are retired
+- every lane they had is in v2 (the AIO's episode source, plate chain and audio
+spine were folded in; MEMORY had nothing v2 lacks). Existing copies keep
+working.
 
 **4. Fill in the two panels**
 
@@ -108,25 +98,7 @@ workflows/H3_Seamless_Chain_v2.json            everything, optional lanes gated 
 
 **5. Queue**
 
-`preview_first_shot` is ON by default, so shot 1 surfaces as soon as it is done and you can judge framing and voice before the rest of the chain commits. Output lands in:
-
-```
-
-**Three workflows, one reason each.** `v2` is everything with the optional
-lanes gated off. `CORE` does the same job with zero third-party packs — start
-there if you want a render before installing anything else. `Keyframes` is a
-different job: a hand-built sampling graph for anchoring a single clip at
-chosen frame positions with per-anchor condition strength, not multishot.
-
-`H3_Multishot_AIO` and `H3_Multishot_MEMORY` from earlier versions are retired
-— every lane they had is in v2 (the AIO's episode source, plate chain and audio
-spine were folded in; MEMORY had nothing v2 lacks). Existing copies keep
-working.
-
-output/video/H3CHAIN/
-```
-
-as a 24fps video with a paired audio file.
+`preview_first_shot` is ON by default, so shot 1 surfaces as soon as it is done and you can judge framing and voice before the rest of the chain commits. Output lands in `output/video/H3CHAIN/` as a 24fps video with a paired audio file.
 
 **Then, for the FULL workflow** (`H3_Seamless_Chain_v2.json`), install the packs
 it needs — ComfyUI validates **every** node class in a graph before it will
@@ -144,6 +116,43 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## Fixed in v2.1.4
+
+Both of these are user-reported, both reproduced, both fixed and verified.
+
+- **The main workflow would not queue without two third-party packs.**
+  `H3_Seamless_Chain_v2.json` ships three optional accelerator nodes -
+  `sol_attn`, `chunk_ffn` (from **ComfyUI-sol-attn**) and `block_cache` (from
+  **comfyui-minimax-h3-blockcache-T8**). They were saved **active**, so a clean
+  install hit `missing_node_type: Node 'attention patch (gated)' has no
+  class_type` and nothing ran - even though the shipped recipe has all three
+  gates OFF and never touches them.
+  They now ship **bypassed** (purple). Bypassed nodes are dropped from the
+  prompt entirely and the model passes straight through, so the workflow queues
+  on an install that has neither pack. To use one: install its pack, select the
+  node, `Ctrl+B` to un-bypass, **then** turn its gate switch on. Both steps.
+
+- **`Value 4 bigger than max of 3: memory_frames` on a workflow you never
+  edited.** v1.2 inserted `seed_per_shot` into the middle of the sampler's
+  input list, ahead of `memory_frames`. ComfyUI stores widget values as a
+  **positional array**, so every dial after the insertion point shifted by one
+  in any workflow saved on v1.0/v1.1: your old `anchor_frames` was being read
+  as `memory_frames`, your old `memory_frames` as `seed_per_shot`, and so on
+  down the node. The error named a dial you never set.
+  Two fixes, one backward and one forward:
+  1. **Repair.** Pre-v1.2 workflows are detected on load (index 8 holds an int
+     where a boolean belongs) and the missing value is spliced back in, so
+     every dial lands where it belongs. Save the workflow to make it stick.
+  2. **Never again.** The sampler now also stores its values **by name** in the
+     node's properties and re-applies them by name on load, so no future change
+     to the input list can shift anything. (Editing workflow JSON by hand? The
+     values live in two places now - patch `h3_widget_values` as well as
+     `widgets_values`.)
+  If a bad value still reaches the queue - custom frontend extensions disabled,
+  say - the validation error now explains the shift instead of naming the dial.
 
 ---
 
@@ -542,17 +551,28 @@ Script format: one prompt per shot, `---` between shots. JSON (`{"prompts": [...
 ## Files in the release zip
 
 ```
-MiniMax-H3_Seamless_Chain_v2.0.zip
-  ComfyUI-H3-Multishot/__init__.py
-  ComfyUI-H3-Multishot/h3_multishot_utils.py    (samplers, loaders, gates)
-  ComfyUI-H3-Multishot/h3_episode_tools.py      (StudioControls, StudioSwitches, AnySwitch)
-  ComfyUI-H3-Multishot/h3_lora_stack.py         (H3LoraStack)
-  ComfyUI-H3-Multishot/h3_gguf_arch.py          (teaches ComfyUI-GGUF the minimax_h3 arch)
-  ComfyUI-H3-Multishot/apply_gguf_arch_patch.py
-  ComfyUI-H3-Multishot/LICENSE
-  workflows/H3_Seamless_Chain_v2.json           (full)
-  workflows/H3_Seamless_Chain_CORE.json         (zero third-party deps)
-  INSTALL.md  SETTINGS.md  PROMPTING.md
+ComfyUI-H3-Multishot/                          this pack
+  LICENSE  README.md  __init__.py              defensive loader
+  apply_gguf_arch_patch.py                     on-disk GGUF arch fallback
+  h3_advanced.py                               advanced sampling helpers
+  h3_avbank_probe.py                           AV bank diagnostics
+  h3_cartridge.py                              portable character cartridges
+  h3_episode_tools.py                          StudioControls, StudioSwitches, AnySwitch
+  h3_gguf_arch.py                              teaches ComfyUI-GGUF the minimax_h3 arch
+  h3_interior_patch.py                         interior anchors (stands down for Motion Context)
+  h3_keyframes.py                              keyframe anchor nodes
+  h3_lora_stack.py                             H3LoraStack
+  h3_multishot_utils.py                        samplers, loaders, gates
+  h3_ref_folder.py                             reference-folder picker
+  rift_prompt_source.py                        RiftPromptSource (prompt sets)
+  rift_script_picker.py                        RiftScriptPicker (JSON scripts)
+  rift_writer_unload.py                        adds unload_model_after to the writer
+ComfyUI_JoyAI_Echo_GGUF_Nodes/                 the LLM prompt writer, modified (see its NOTICE)
+INSTALL.md  PROMPTING.md  SETTINGS.md
+example_script.txt                             worked four-shot two-hander
+workflows/H3_Seamless_Chain_v2.json            everything, optional lanes gated off
+workflows/H3_Seamless_Chain_CORE.json          same job, zero third-party packs
+workflows/H3_Keyframes.json                    single-clip keyframe anchoring
 ```
 
 ---

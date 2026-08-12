@@ -2566,6 +2566,29 @@ class H3MultishotMemorySampler:
     FUNCTION = "run"
     CATEGORY = "sampling/minimax"
 
+    @classmethod
+    def VALIDATE_INPUTS(cls, memory_frames):
+        # Naming memory_frames here hands ITS range check to us and leaves
+        # every other input on ComfyUI's own validation.
+        #
+        # Out of range almost never means the user typed it. v1.2 inserted
+        # seed_per_shot at widget index 8, ahead of memory_frames, so a
+        # workflow saved on v1.0/v1.1 reads its old anchor_frames (0-9) into
+        # memory_frames (0-3) - and the stock message, "Value 4 bigger than
+        # max of 3", sends people hunting a dial they never touched. The JS
+        # extension repairs that on load; this is the backstop for anyone
+        # running with custom frontend extensions disabled.
+        if not 0 <= int(memory_frames) <= 3:
+            return (f"memory_frames is {memory_frames}, but the range is 0-3 "
+                    f"(H3 holds at most 3 references, pinned + recent).\n"
+                    f"If you did not set it: this workflow was saved before "
+                    f"v1.2, which added seed_per_shot ahead of memory_frames "
+                    f"and shifted every dial after it by one. Re-open the "
+                    f"shipped H3_Seamless_Chain_v2.json, or right-click the "
+                    f"sampler -> Fix node (recreate) and re-enter your "
+                    f"settings, then save.")
+        return True
+
     def run(self, model, clip, video_vae, audio_vae, script, shot_count, width,
             height, frames_per_shot, seed, steps, memory_frames, anchor_frames,
             seed_per_shot=True, start_image=None,

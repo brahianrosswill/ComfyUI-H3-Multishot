@@ -282,7 +282,7 @@
       ],
       "flags": {},
       "order": 37,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "localized_name": "model",
@@ -414,7 +414,7 @@
       ],
       "flags": {},
       "order": 44,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "localized_name": "model",
@@ -719,7 +719,7 @@
         "collapsed": true
       },
       "order": 42,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "localized_name": "model",
@@ -1816,46 +1816,6 @@
             "name": "preview_first_shot"
           },
           "link": null
-        },
-        {
-          "localized_name": "two_pass_upscale",
-          "name": "two_pass_upscale",
-          "shape": 7,
-          "type": "BOOLEAN",
-          "widget": {
-            "name": "two_pass_upscale"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "upscale_factor",
-          "name": "upscale_factor",
-          "shape": 7,
-          "type": "FLOAT",
-          "widget": {
-            "name": "upscale_factor"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "pass1_fraction",
-          "name": "pass1_fraction",
-          "shape": 7,
-          "type": "FLOAT",
-          "widget": {
-            "name": "pass1_fraction"
-          },
-          "link": null
-        },
-        {
-          "localized_name": "upscale_audio_denoise",
-          "name": "upscale_audio_denoise",
-          "shape": 7,
-          "type": "FLOAT",
-          "widget": {
-            "name": "upscale_audio_denoise"
-          },
-          "link": null
         }
       ],
       "outputs": [
@@ -2782,7 +2742,7 @@
       "title": "VRAM / SPEED",
       "properties": {},
       "widgets_values": [
-        "VRAM / SPEED\n\nSTART HERE: every switch OFF, VRAM RESERVE at 0. That is the verified\nrecipe AND, on current builds, the fastest route to a working render.\nThe reserve measures each shape and conditioning payload as it renders\nand sizes the pool itself - it has held on both 32GB and 24GB cards.\nReach for the levers below only if a render actually spills, and the\nconsole names it when that happens rather than leaving you guessing.\n\nOpt-in levers, in model-path order:\n\nsol_attn - memory-efficient attention. The biggest VRAM saving at high\n  resolution or long shots. Small quality risk: A/B one render before\n  trusting it for a keeper.\nchunk_ffn - chunks the feed-forward pass. Moderate VRAM saving, small\n  slowdown, no known quality cost.\nblock_cache - skips near-duplicate transformer blocks. This one buys\n  SPEED, not VRAM, and can soften subtle motion - keep OFF for final\n  masters.\n(The other toggles on the panel are not wired in this workflow and do\nnothing here.)\n\nVRAM RESERVE - activation headroom on the model loader. Leave it at 0.\n  A hand-set value OVERRIDES the measurement, so a number that was\n  right for one shape becomes wrong for the next. Set one only to dig\n  out of a spill the console has already reported."
+        "VRAM / SPEED\n\nSTART HERE: every switch OFF, VRAM RESERVE at 0. That is the verified\nrecipe AND, on current builds, the fastest route to a working render.\nThe reserve measures each shape and conditioning payload as it renders\nand sizes the pool itself - it has held on both 32GB and 24GB cards.\nReach for the levers below only if a render actually spills, and the\nconsole names it when that happens rather than leaving you guessing.\n\nOpt-in levers, in model-path order:\n\nsol_attn - memory-efficient attention. The biggest VRAM saving at high\n  resolution or long shots. Small quality risk: A/B one render before\n  trusting it for a keeper.\nchunk_ffn - chunks the feed-forward pass. Moderate VRAM saving, small\n  slowdown, no known quality cost.\nblock_cache - skips near-duplicate transformer blocks. This one buys\n  SPEED, not VRAM, and can soften subtle motion - keep OFF for final\n  masters.\n(The other toggles on the panel are not wired in this workflow and do\nnothing here.)\n\nTHE THREE LEVER NODES SHIP BYPASSED (purple). They come from two\noptional third-party packs, and a clean install does not have them:\n\n  sol_attn / chunk_ffn  ->  ComfyUI-sol-attn\n  block_cache           ->  comfyui-minimax-h3-blockcache-T8\n\nBypassed, they are dropped from the prompt entirely and the model\npasses straight through, so the workflow queues without either pack.\nTo actually use one: install its pack, select the node, Ctrl+B to\nun-bypass, THEN turn its gate switch on. Both steps are needed.\n\nVRAM RESERVE - activation headroom on the model loader. Leave it at 0.\n  A hand-set value OVERRIDES the measurement, so a number that was\n  right for one shape becomes wrong for the next. Set one only to dig\n  out of a spill the console has already reported."
       ],
       "color": "#432",
       "bgcolor": "#653"
