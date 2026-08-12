@@ -130,8 +130,14 @@ Every one of these can be removed instead:
   everything else equal. CORE ships `beta` for exactly this reason.
 - **ComfyUI-H3-Motion-Context** — set `continuity` to `first_frame`. That is the
   model's own trained hand-off; it chains well and needs nothing extra.
-- **ComfyUI-sol-attn** / **blockcache-T8** — delete the three patch nodes and
-  their gates. They are off by default, so you lose nothing that was running.
+- **ComfyUI-sol-attn** / **blockcache-T8** — nothing to do. All three patch
+  nodes ship **bypassed**, so the graph queues without either pack. To actually
+  use one you need BOTH steps, in this order: install the pack, restart, `Ctrl+B`
+  the node to un-bypass it, **then** turn its switch on in VRAM / SPEED
+  SWITCHES. Un-bypassing alone does nothing, and flipping the switch while the
+  node is still bypassed does nothing either. Un-bypassing a node whose pack is
+  NOT installed makes the whole workflow un-queueable — that is what the
+  bypassing is protecting you from.
 - **ComfyUI-Custom-Scripts** — nothing to do. SCRIPT PREVIEW ships bypassed, so
   a bypassed node is dropped from the prompt and the graph queues without the
   pack installed. It is a leaf anyway: the writer feeds the sampler directly, so

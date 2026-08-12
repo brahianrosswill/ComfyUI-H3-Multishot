@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.8 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.9 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,66 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.1.9
+
+### Fixed: `H3_Seamless_Chain_CORE` could not be queued at all
+
+```
+value_smaller_than_min: Value 0.0 smaller than min of 1.0 - output_scale
+```
+
+CORE's sampler still carried the widget array it was saved with **before 2.1.3
+removed the four `two_pass_upscale` dials**. Nineteen saved values against the
+class's fourteen live widgets, so the frontend put `false` into `output_scale`
+(minimum 1.0) and `1.5` into `save_every_shot`, and the server rejected the whole
+prompt. The workflow advertised as the one with no third-party dependencies — the
+safest thing for a new user to open — has been un-runnable since 2.1.3.
+
+It was never caught because CORE had **never been rendered end to end**. Our own
+release checklist said "one CORE render before posting" and that step had been
+carried, unticked, through six releases.
+
+The array is now generated from a name→value map resolved against the server's
+schema, and the map is stored on the node so the pack's JS can re-apply it by
+name — the same treatment the full workflow's sampler got in 2.1.6. CORE has now
+rendered: three chained shots at 960x544, 370 frames, picture and audio, holding
+framing, wardrobe and lighting across both joins.
+
+All three bundled workflows are now submit-tested against a live server as part
+of the release routine, not read.
+
+### Bypassed nodes now say what they need
+
+Four nodes ship bypassed because their packs are not in the zip, and a missing
+class fails the entire prompt. That is the right default — but a bypassed node
+sitting on the canvas invites you to un-bypass it, and doing that without the
+pack installed breaks the workflow with no explanation. Joe's point, and he is
+right.
+
+Now it says so in four places, in order of how hard they are to miss:
+
+| | |
+|---|---|
+| the group title | `VRAM PATCHES - bypassed: install the pack named in each title BEFORE Ctrl+B` |
+| each node title | `attention patch (bypassed - needs ComfyUI-sol-attn)`, and so on |
+| a note above the cluster | install first, then `Ctrl+B`; without it the whole workflow stops queueing |
+| the VRAM / SPEED note | the full table with repository URLs, and the two-step rule |
+
+The two-step rule is the part people lose: un-bypassing a patch node changes
+nothing on its own, and flipping its switch while the node is still bypassed
+changes nothing either. Both, in that order, after installing the pack.
+
+`SCRIPT PREVIEW` is the odd one out — it is a leaf, so leaving it bypassed costs
+you the on-canvas preview and nothing else.
+
+**Why not just bundle the packs?** The writer pack is bundled because it is
+modified and pinned. These three are not: shipping a second copy of
+Custom-Scripts, sol-attn or blockcache-T8 inside the zip would shadow whatever
+the user already has installed and freeze it at the version we happened to
+vendor. Naming them and linking them is the honest version.
 
 ---
 
