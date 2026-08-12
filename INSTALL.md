@@ -105,7 +105,7 @@ nodes. Two of them ship inside this zip.
 | **RES4LYF** | the `beta57` scheduler the full workflow ships with | `github.com/ClownsharkBatwing/RES4LYF` |
 | **ComfyUI-sol-attn** | the memory-efficient attention and chunked feed-forward switches | ComfyUI-sol-attn |
 | **comfyui-minimax-h3-blockcache-T8** | the block-cache speed switch | comfyui-minimax-h3-blockcache-T8 |
-| **ComfyUI-Custom-Scripts** | `ShowText`, the in-canvas script preview | `github.com/pythongosssss/ComfyUI-Custom-Scripts` |
+| **ComfyUI-Custom-Scripts** | `ShowText`, the in-canvas script preview. **Ships bypassed** - install it and Ctrl+B the node if you want it | `github.com/pythongosssss/ComfyUI-Custom-Scripts` |
 
 ### A note on the Motion-Context fork
 
@@ -132,9 +132,11 @@ Every one of these can be removed instead:
   model's own trained hand-off; it chains well and needs nothing extra.
 - **ComfyUI-sol-attn** / **blockcache-T8** — delete the three patch nodes and
   their gates. They are off by default, so you lose nothing that was running.
-- **ComfyUI-Custom-Scripts** — delete the SCRIPT PREVIEW node. It is a leaf: the
-  writer feeds the sampler directly, so removing the preview costs you the
-  preview and nothing else.
+- **ComfyUI-Custom-Scripts** — nothing to do. SCRIPT PREVIEW ships bypassed, so
+  a bypassed node is dropped from the prompt and the graph queues without the
+  pack installed. It is a leaf anyway: the writer feeds the sampler directly, so
+  the preview costs you the preview and nothing else. Install the pack and
+  Ctrl+B the node to switch it on.
 
 ### The prompt writer pack — it is in this zip
 

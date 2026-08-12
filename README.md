@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.7 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.8 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,53 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.1.8
+
+### Fixed: one node in the workflow came from a pack that is not in the zip
+
+`SCRIPT PREVIEW` is `ShowText` from **ComfyUI-Custom-Scripts**, and it shipped
+*active*. A node whose class is missing serialises as `class_type: null` and the
+server rejects the **whole prompt**, so without that pack installed the workflow
+could not be queued — for the sake of an on-canvas text box. INSTALL.md said to
+delete the node, which only helps someone who reads it before pressing Queue.
+
+It now ships **bypassed**, the same remedy the three accelerator nodes got in
+2.1.4. A bypassed node is dropped from the prompt entirely. Install
+Custom-Scripts and `Ctrl+B` the node if you want the preview; the writer feeds
+the sampler either way.
+
+Found by mapping every node type in all three bundled workflows to its owning
+Python module against a running server. That check is now part of the release
+routine instead of something I do after a user tells me. The other two workflows
+were already clean, and everything else in the full one is either core ComfyUI,
+this pack, the writer pack **that is in the zip**, or one of the three bypassed
+accelerators.
+
+### Verified end-to-end on ComfyUI 0.32.0
+
+Not by reading the graph — by loading the shipped file in a browser on a 0.32.0
+install and pressing Queue. Twice: once through the prompt-writer lane exactly
+as shipped, and once with a hand-written script.
+
+- loads with no missing node types, and every sampler widget lands on its own
+  name (`memory_frames` 0, `master_normalize` luma+contrast, `pin_renorm` on) —
+  the shift that caused `The value 1 for reference_image_size is not available`
+  cannot reproduce
+- no null `class_type`: the bypassed preview and the three bypassed
+  accelerators are all dropped cleanly
+- three chained shots at 960x544, 124 frames each → **328 frames**, exactly 372
+  minus the two 22-frame `context_pin` head trims
+- a reviewer given the clip cold, with no idea how it was made, read it as
+  **one continuous static take**, found no cut or jump anywhere, transcribed all
+  three lines of dialogue, reported the lip-sync as matching, and found no shift
+  in framing, colour, brightness or wardrobe and no hiss, dropout or click in
+  the audio
+
+0.30.0 remains the version everything else here was measured on; both are now
+tested before release.
 
 ---
 

@@ -2720,7 +2720,7 @@
         "collapsed": false
       },
       "order": 39,
-      "mode": 0,
+      "mode": 4,
       "inputs": [
         {
           "localized_name": "text",
@@ -2739,7 +2739,7 @@
           "links": []
         }
       ],
-      "title": "SCRIPT PREVIEW (exactly what renders)",
+      "title": "SCRIPT PREVIEW (bypassed - needs ComfyUI-Custom-Scripts)",
       "properties": {
         "cnr_id": "comfyui-custom-scripts",
         "ver": "609f3afaa74b2f88ef9ce8d939626065e3247469",
@@ -2766,7 +2766,7 @@
       "title": "PROMPT SOURCE",
       "properties": {},
       "widgets_values": [
-        "PROMPT SOURCE\n\n1. LLM: describe the scene in story_idea, queue. num_shots 0 = the model decides. base_url/model_name = any OpenAI-compatible endpoint (local servers need no key).\n2. HAND-WRITTEN: mode = \"passthrough (raw JSON, skip LLM)\" and put {\"prompts\":[\"...\",\"...\"]} in story_idea. Plain text with shots separated by --- on its own line also works, pasted straight into the sampler's script box with the link unplugged.\n3. REPEATABLE: the LLM has no seed - after a good run, copy the SCRIPT PREVIEW text into story_idea with passthrough mode.\n\nCLEAN-JOIN RULES (the LLM applies these via join_style; hand scripts must obey them too): open each later shot holding the previous shot's closing arrangement, ~2 quiet seconds before speech; end settled with ~2s spare; never let a line straddle two shots; repeat every character's appearance description and the room/light description word-for-word in every shot.\n\nLOCAL WRITER? Turn on unload_model_after on the REWRITER. It frees that model from Ollama as soon as the script is written, so the video model gets the card - otherwise it stays loaded for the server's default five minutes, which is the whole of shot 1."
+        "PROMPT SOURCE\n\n1. LLM: describe the scene in story_idea, queue. num_shots 0 = the model decides. base_url/model_name = any OpenAI-compatible endpoint (local servers need no key).\n2. HAND-WRITTEN: mode = \"passthrough (raw JSON, skip LLM)\" and put {\"prompts\":[\"...\",\"...\"]} in story_idea. Plain text with shots separated by --- on its own line also works, pasted straight into the sampler's script box with the link unplugged.\n3. REPEATABLE: the LLM has no seed - after a good run, copy the SCRIPT PREVIEW text into story_idea with passthrough mode.\n\nSCRIPT PREVIEW ships BYPASSED (purple). It is the only node in this workflow from a pack that is not in the zip - ComfyUI-Custom-Scripts - so it is bypassed to keep the graph queueable without it. Install that pack and Ctrl+B the node to read the generated script on canvas; the writer feeds the sampler either way.\n\nCLEAN-JOIN RULES (the LLM applies these via join_style; hand scripts must obey them too): open each later shot holding the previous shot's closing arrangement, ~2 quiet seconds before speech; end settled with ~2s spare; never let a line straddle two shots; repeat every character's appearance description and the room/light description word-for-word in every shot.\n\nLOCAL WRITER? Turn on unload_model_after on the REWRITER. It frees that model from Ollama as soon as the script is written, so the video model gets the card - otherwise it stays loaded for the server's default five minutes, which is the whole of shot 1."
       ],
       "color": "#432",
       "bgcolor": "#653"
