@@ -146,18 +146,54 @@ def _mn_normalize(parts, mode, med=9):
         return parts, ""
     luma = frames.mean(dim=(1, 2, 3))
     k = max(3, min(int(med) | 1, (n // 2) * 2 - 1)); pad = k // 2
-    med_l = torch.nn.functional.pad(luma[None, None], (pad, pad),
-                                    mode="replicate")[0, 0].unfold(0, k, 1).median(-1).values
+
+    def _med(v):
+        return torch.nn.functional.pad(
+            v[None, None], (pad, pad), mode="replicate"
+        )[0, 0].unfold(0, k, 1).median(-1).values
+
+    med_l = _med(luma)
     target = luma.median()
     gain = (target / med_l.clamp_min(1e-4)).clamp(0.70, 1.43)
-    out = (frames * gain[:, None, None, None]).clamp(0, 1)
+
+    if mode == "luma+contrast":
+        # Second drift, measured on master_00014_: the mean holds flat while
+        # the SPREAD grows every hop (p25 6->2, p95 85->96 over three shots).
+        # Matching the mean re-centres that and hands the next shot a
+        # higher-contrast start, so the luma fix was masking it.
+        #
+        # An affine remap about each frame's own mean rescales amplitude and
+        # leaves every edge where it was - not the blur the note below rules
+        # out. Spatial accretion is still not fixable here.
+        sd = frames.std(dim=(1, 2, 3))
+        med_s = _med(sd)
+        # Anchor to SHOT 1, not the timeline median. Contrast here only ever
+        # ratchets up, so shot 1 is the one frame-set with nothing accreted
+        # onto it - the median target pulls shot 1 UP to meet the drift
+        # (measured on master_00014_: +11.7% texture on shot 1 for no benefit,
+        # 1.069 vs 1.064 per hop). Anchoring to shot 1 leaves it untouched
+        # (+0.1%) and only ever pulls later shots down.
+        s_target = sd[:parts[0].shape[0]].median()
+        cgain = (s_target / med_s.clamp_min(1e-4)).clamp(0.70, 1.43)
+        m = luma[:, None, None, None]
+        out = ((frames - m) * cgain[:, None, None, None] + m
+               * gain[:, None, None, None]).clamp(0, 1)
+    else:
+        out = (frames * gain[:, None, None, None]).clamp(0, 1)
     res, i = [], 0
     for p in parts:
         res.append(out[i:i + p.shape[0]]); i += p.shape[0]
-    after = torch.cat(res, 0).mean(dim=(1, 2, 3))
+    joined = torch.cat(res, 0)
+    after = joined.mean(dim=(1, 2, 3))
     msg = ("luma %.3f-%.3f -> %.3f-%.3f (target %.3f, gain %.3f-%.3f)"
            % (float(luma.min()), float(luma.max()), float(after.min()),
               float(after.max()), float(target), float(gain.min()), float(gain.max())))
+    if mode == "luma+contrast":
+        a_sd = joined.std(dim=(1, 2, 3))
+        sd0 = frames.std(dim=(1, 2, 3))
+        msg += ("; contrast %.4f-%.4f -> %.4f-%.4f"
+                % (float(sd0.min()), float(sd0.max()),
+                   float(a_sd.min()), float(a_sd.max())))
     return res, msg
 
 
@@ -2528,7 +2564,7 @@ class H3MultishotMemorySampler:
                            "set output_scale as well to land on an exact size. "
                            "Reads models/upscale_models/, the same folder "
                            "ComfyUI's own Load Upscale Model reads."}),
-            "master_normalize": (["off", "luma"], {
+            "master_normalize": (["off", "luma", "luma+contrast"], {
                 "default": "off",
                 "tooltip": "Deflicker the FINISHED chain: every frame driven "
                            "to ONE global luma target, after the master "
@@ -2559,7 +2595,7 @@ class H3MultishotMemorySampler:
                            "framing can disagree with the text. All four values "
                            "are latent-aligned; arbitrary numbers are not."}),
             "pin_noise": ("FLOAT", {
-                "default": 0.05, "min": 0.0, "max": 0.05, "step": 0.005,
+                "default": 0.05, "min": 0.0, "max": 0.30, "step": 0.005,
                 "tooltip": "context_pin only: mix this much seeded noise into "
                            "the PINNED LATENT before it conditions the next "
                            "shot. Same noised-clean-condition idea as "
@@ -3235,13 +3271,26 @@ class H3MultishotMemorySampler:
                     # noised. Noising the audio component dulls the voice,
                     # which is the drift we already fight elsewhere.
                     _t = float(pin_noise)
+                    _sig = []
 
                     def _noise_one(_z):
+                        # Variance-preserving, scaled to the latent's OWN
+                        # standard deviation. Unit-variance noise would make
+                        # this dial resolution- and content-dependent: the
+                        # latent's magnitude is not fixed, so a fixed noise
+                        # magnitude is a different SNR at every render size.
+                        # sqrt(1-t^2) keeps total variance at sigma^2 rather
+                        # than attenuating the pin, so t changes ONLY the
+                        # noise fraction and not the pin's strength.
                         _g = torch.Generator(device=_z.device).manual_seed(
                             shot_seed ^ 0x91EE)
-                        return (1.0 - _t) * _z + _t * torch.randn(
-                            _z.shape, generator=_g, device=_z.device,
-                            dtype=_z.dtype)
+                        _s = _z.float().std()
+                        _sig.append(float(_s))
+                        _n = torch.randn(_z.shape, generator=_g,
+                                         device=_z.device, dtype=torch.float32)
+                        _out = ((1.0 - _t * _t) ** 0.5) * _z.float() \
+                            + _t * _s * _n
+                        return _out.to(_z.dtype)
 
                     _zs = _pin_src["samples"]
                     _pin_src = dict(_pin_src)
@@ -3254,8 +3303,10 @@ class H3MultishotMemorySampler:
                     else:
                         _pin_src["samples"] = _noise_one(_zs)
                         _what = "pin"
-                    print("[H3Memory] context_pin: %s noised %.3f "
-                          "(anti-ratchet)" % (_what, _t), flush=True)
+                    print("[H3Memory] context_pin: %s noised %.3f of its "
+                          "own sigma=%.4f (anti-ratchet, variance-preserving)"
+                          % (_what, _t, _sig[0] if _sig else float("nan")),
+                          flush=True)
                 cond, _cp_trim = _mc_cls().apply(
                     conditioning=cond, vae=video_vae, latent=latent,
                     context_length=_pf, audio_context_length=int(_pf),
