@@ -2543,6 +2543,43 @@ class H3MultishotMemorySampler:
                            "only: texture drift is NOT fixable after the fact, "
                            "because the only lever is blur and blur destroys "
                            "real detail along with the invented kind."}),
+            # APPEND-ONLY from here. Inserting a widget above this line shifts
+            # every saved workflow's values by one (v1.2 did exactly that with
+            # seed_per_shot, and users got "Value 4 bigger than max of 3:
+            # memory_frames" on graphs they had never edited).
+            "pin_frames": (["22", "5", "39", "56"], {
+                "default": "22",
+                "tooltip": "context_pin only: how many frames of the previous "
+                           "shot are pinned as raw latents at the head of the "
+                           "next one. This is the whole join. 22 is the shipped "
+                           "default; the longer settings hold the previous "
+                           "shot's composition further into the new one, which "
+                           "matters most at the FIRST join - shot 1 has nothing "
+                           "pinned behind it, so it is the only shot whose "
+                           "framing can disagree with the text. All four values "
+                           "are latent-aligned; arbitrary numbers are not."}),
+            "pin_noise": ("FLOAT", {
+                "default": 0.05, "min": 0.0, "max": 0.05, "step": 0.005,
+                "tooltip": "context_pin only: mix this much seeded noise into "
+                           "the PINNED LATENT before it conditions the next "
+                           "shot. Same noised-clean-condition idea as "
+                           "join_anchor_noise, aimed at the thing that "
+                           "actually carries the drift here - measured, the "
+                           "texture ratchet under context_pin rides the raw "
+                           "latent pin, and neither join_anchor_noise "
+                           "(keyframes only) nor bank_ref_noise (bank images) "
+                           "touches it. "
+                           "0.05 is the shipped default and the measured "
+                           "setting: across two seeds it took texture growth "
+                           "from 1.043 and 1.100 per hop down to 1.012 and "
+                           "1.015 - the ratchet essentially gone - with both "
+                           "chains still reading as one continuous take and "
+                           "no loss of real detail at 1:1. The response is "
+                           "sharply non-linear: 0.02 does nothing at all, "
+                           "0.04 removes about a third. Set 0 to restore the "
+                           "pre-2.1.5 behaviour. "
+                           "The noised latent conditions the next shot but "
+                           "never reaches the final cut."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
@@ -2604,7 +2641,7 @@ class H3MultishotMemorySampler:
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
             upscale_model_name="(none)",
-            master_normalize="off"):
+            master_normalize="off", pin_frames="22", pin_noise=0.0):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -3183,13 +3220,49 @@ class H3MultishotMemorySampler:
                     print("[H3Memory] two-pass: pin resampled to the pass-1 "
                           "grid (%dx%d latent)" % (_tp_lat_h1, _tp_lat_w1),
                           flush=True)
+                _pf = str(pin_frames) if str(pin_frames) in (
+                    "5", "22", "39", "56") else "22"
+                if (pin_noise > 0 and isinstance(_pin_src, dict)
+                        and "samples" in _pin_src):
+                    # noised clean condition, applied to the carrier. The pin
+                    # is this model's own output; left pristine the model
+                    # treats it as ground truth and adds detail on top of
+                    # detail, once per hop. Seeded so same-seed A/B arms are
+                    # comparable.
+                    #
+                    # The pin is a NestedTensor - [0] video, [-1] audio - so
+                    # it has to be unbound first, and only the VIDEO half is
+                    # noised. Noising the audio component dulls the voice,
+                    # which is the drift we already fight elsewhere.
+                    _t = float(pin_noise)
+
+                    def _noise_one(_z):
+                        _g = torch.Generator(device=_z.device).manual_seed(
+                            shot_seed ^ 0x91EE)
+                        return (1.0 - _t) * _z + _t * torch.randn(
+                            _z.shape, generator=_g, device=_z.device,
+                            dtype=_z.dtype)
+
+                    _zs = _pin_src["samples"]
+                    _pin_src = dict(_pin_src)
+                    if getattr(_zs, "is_nested", False):
+                        import comfy.nested_tensor as _nt
+                        _cps = list(_zs.unbind())
+                        _cps[0] = _noise_one(_cps[0])
+                        _pin_src["samples"] = _nt.NestedTensor(_cps)
+                        _what = "video half of the AV pin"
+                    else:
+                        _pin_src["samples"] = _noise_one(_zs)
+                        _what = "pin"
+                    print("[H3Memory] context_pin: %s noised %.3f "
+                          "(anti-ratchet)" % (_what, _t), flush=True)
                 cond, _cp_trim = _mc_cls().apply(
                     conditioning=cond, vae=video_vae, latent=latent,
-                    context_length="22", audio_context_length=22,
+                    context_length=_pf, audio_context_length=int(_pf),
                     context_latent=_pin_src)
                 print("[H3Memory] context_pin: previous shot's tail pinned "
-                      "as raw latents (22f video + 22f audio ref, trim %d "
-                      "on decode)" % _cp_trim, flush=True)
+                      "as raw latents (%sf video + %sf audio ref, trim %d "
+                      "on decode)" % (_pf, _pf, _cp_trim), flush=True)
 
             # issue #8: separate TE device -> nothing to reclaim, keep it hot
             _te_dev = getattr(clip.patcher, "load_device", None)

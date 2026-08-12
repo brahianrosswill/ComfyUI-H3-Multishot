@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.4 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.5 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,91 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.1.5
+
+**The texture ratchet under `context_pin` is fixed.** Chained shots got
+progressively sharper - detail accreting on detail, once per hop - and none of
+the three dials that were supposed to prevent it were reaching the cause.
+
+Measured, 4 shots x 243f, two seeds, base resolution (no upscaler in the loop),
+texture = variance of a Laplacian on a fixed proxy so sizes stay comparable:
+
+| `pin_noise` | seed A per hop | seed B per hop |
+|---|---|---|
+| 0.00 (old behaviour) | 1.043 | 1.100 |
+| 0.02 | 1.046 | - |
+| 0.04 | 1.030 | 1.065 |
+| **0.05 (new default)** | **1.012** | **1.015** |
+
+1.000 means no accretion at all. Both chains still read as a single continuous
+take to a blind reviewer, every line of dialogue intact, and 1:1 crops of the
+last shot show no loss of real detail - corduroy wale, spectacle frames and
+chair studs all survive. What goes away is the invented crispness.
+
+- **`pin_noise` (new, default 0.05).** Mixes seeded noise into the pinned
+  latent before it conditions the next shot. Under `context_pin` the pin *is*
+  the carrier: it is the model's own output, and left pristine the model treats
+  it as ground truth and sharpens on top of it every hop. This is the same
+  noised-clean-condition idea the pack already used elsewhere, finally aimed at
+  the right target. The pin is an AV `NestedTensor`; only the video half is
+  noised, because noising the audio reference dulls the voice.
+  Response is sharply non-linear - 0.02 does nothing, 0.04 removes about a
+  third. Set `0` for the pre-2.1.5 behaviour.
+- **`pin_frames` (new, default 22).** The pin length, previously hard-coded.
+  Options are the only latent-aligned values the Motion-Context node accepts:
+  22 / 5 / 39 / 56. Longer pins also cut the ratchet (39 gave 1.017 per hop)
+  but the head trim scales with them, so 39 frames of audio are cut per join
+  instead of 22 - a blind review of that arm caught a jump at the third join
+  and a line clipped from *"So it stays in the drawer"* to *"...is in the
+  drawer"*. Leave it at 22 and use `pin_noise` instead.
+
+### Three dials that were doing nothing under `context_pin`
+
+Verified from source, not inferred. If you had these set, they were inert:
+
+- `join_anchor_noise` - noises **keyframe** latents. `context_pin` has no join
+  keyframes.
+- `handoff_release` - belongs to the `latent_handoff` path only.
+- `bank_ref_noise` - reaches the bank's reference images, which measurement
+  shows are not the carrier (0.02 and 0.05 gave 1.032 and 1.039 against a
+  1.043 baseline - inside the noise). It does help *in combination* with
+  `pin_noise`, but `pin_noise=0.05` alone gets further on one dial.
+
+### The per-shot upscaler is not the cause
+
+`output_scale` / `upscale_model_name` run once per shot, but the memory bank
+takes its reference clip before the upscale and the pin comes from upstream of
+the VAE, so the upscaler cannot feed anything forward. Running the identical
+ESRGAN+lanczos path offline over the same frames put its contribution at about
+a sixth of the end-to-end spread (+12.6% base becoming +15.0% upscaled). Real,
+but a minority share - and now largely moot, since the thing it was amplifying
+is gone.
+
+### Framing that changes once, at the first join only
+
+Not a bug, and not fixable with a setting: shot 1 is the only shot with nothing
+pinned behind it, so it is the only one whose composition can disagree with the
+text. A prop whose size and screen position are not stated will be re-imagined
+when shot 2 inherits the pin. In one 5-shot render a table lamp grew 3.8x and
+slid over ~1.7s starting exactly at the first seam, then held for the remaining
+37 seconds. Writing *"the shade is level with his shoulder and stands about one
+third the height of the frame"* into the scene block removed it entirely across
+six arms (<=1.4% area, <=0.2px centroid).
+
+**Name the size and screen position of any prop that sits at the frame edge, in
+every shot's scene block.**
+
+### A note on run-to-run variance
+
+H3's int8/GGUF kernels are not bit-deterministic: two renders with identical
+inputs differ by ~0.8-1.4 mean absolute levels out of 255, and per-shot texture
+carries 0.7-3.3% run-to-run noise. Baseline ratchet severity is also strongly
+seed-dependent (1.043 vs 1.100 per hop, same script and settings). Single-render
+A/Bs of small effects here are not trustworthy; the numbers above are two seeds
+with a log-linear fit across all four shots rather than an endpoint ratio.
 
 ---
 
