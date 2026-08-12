@@ -1,7 +1,7 @@
 {
   "id": "h3-seamless-chain-v1",
   "revision": 0,
-  "last_node_id": 53,
+  "last_node_id": 54,
   "last_link_id": 75,
   "nodes": [
     {
@@ -1444,7 +1444,7 @@
       "title": "SAMPLER",
       "properties": {},
       "widgets_values": [
-        "SAMPLER - every dial\n\nscript: fed by SCRIPT PREVIEW; unplug to hand-edit here.\nshot_count: 0 = one shot per prompt; 1-8 forces the count (extra\n  prompts drop, missing ones continue the last).\nsize/frames/steps + sampler/scheduler: all driven by MASTER\n  CONTROLS (the override inputs carry sampler/scheduler names).\nseed: randomize explores; fix it to make a keeper repeatable.\nseed_per_shot [ON]: measured - varying the seed per shot HOLDS the\n  face; one seed for all shots drifted face AND voice. Leave ON.\n\nVOICE\nself_anchor_voice [ON]: automatic voice pin - shot 1's own audio\n  becomes the reference for every later shot. Write shot 1 with a\n  clean solo line. Best on a ref2va checkpoint; a wired voice_ref\n  file takes priority over it.\n\nTWO-PASS UPSCALE (needs the H3 latent-upscaler pack)\nNOT usable with continuity = context_pin or latent_handoff, or\n  with an audio spine - those carry raw latents / one locked\n  denoise trajectory across the join and a two-pass render cannot\n  preserve either. The node stops with an error naming the clash\n  instead of quietly weakening the join. Available on cut,\n  seamless, seamless_tail, first_frame and flf_chain.\ntwo_pass_upscale [OFF]: every shot renders low-res through\n  pass1_fraction of the steps, upscales in latent space, finishes\n  at full res. Faster than native full-res, sharper than low-res.\nupscale_factor [1.5]: pass-1 size = size/factor (snapped to /32).\npass1_fraction [0.4]: verified clean; past ~0.5 pass 2 cannot\n  erase the upscale pattern and a ghost/moire lattice appears.\nupscale_audio_denoise [0.35]: how much pass 2 may rewrite audio.\n  0 locks pass-1 audio (safest for voice), 1 = full remix.\n\nQUALITY / WORKFLOW\nreference_image_size [match]: 'max' = 2048px refs, best identity,\n  several times slower (ref tokens ride every step).\npreview_first_shot [OFF]: writes shot 1 to output/video/\n  H3_FIRSTSHOT/ the moment it decodes - cancel bad takes early.\n  The full path is printed to the console.\nchain_gain_control [off]: 'flatten' stops seam sharpening on long\n  chains (texture ratchets ~1.3x per join; visible past ~5 shots).\n  Recommended ON for chains longer than ~5 shots.\n\nSeam audio is automatic: the boundary cut lands in the quietest\ngap near each join, then a 40ms equal-power weld. A clipped word\nat a join means dialogue sat too close to a boundary - see the\nwriting rules."
+        "SAMPLER - every dial\n\nscript: fed by SCRIPT PREVIEW; unplug to hand-edit here.\nshot_count: 0 = one shot per prompt; 1-8 forces the count (extra\n  prompts drop, missing ones continue the last).\nsize/frames/steps + sampler/scheduler: all driven by MASTER\n  CONTROLS (the override inputs carry sampler/scheduler names).\nseed: randomize explores; fix it to make a keeper repeatable.\nseed_per_shot [ON]: measured - varying the seed per shot HOLDS the\n  face; one seed for all shots drifted face AND voice. Leave ON.\n\nVOICE\nself_anchor_voice [ON]: automatic voice pin - shot 1's own audio\n  becomes the reference for every later shot. Write shot 1 with a\n  clean solo line. Best on a ref2va checkpoint; a wired voice_ref\n  file takes priority over it.\n\nTWO-PASS UPSCALE (needs the H3 latent-upscaler pack)\nNOT usable with continuity = context_pin or latent_handoff, or\n  with an audio spine - those carry raw latents / one locked\n  denoise trajectory across the join and a two-pass render cannot\n  preserve either. The node stops with an error naming the clash\n  instead of quietly weakening the join. Available on cut,\n  seamless, seamless_tail, first_frame and flf_chain.\ntwo_pass_upscale [OFF]: every shot renders low-res through\n  pass1_fraction of the steps, upscales in latent space, finishes\n  at full res. Faster than native full-res, sharper than low-res.\nupscale_factor [1.5]: pass-1 size = size/factor (snapped to /32).\npass1_fraction [0.4]: verified clean; past ~0.5 pass 2 cannot\n  erase the upscale pattern and a ghost/moire lattice appears.\nupscale_audio_denoise [0.35]: how much pass 2 may rewrite audio.\n  0 locks pass-1 audio (safest for voice), 1 = full remix.\n\nQUALITY / WORKFLOW\nreference_image_size [match]: 'max' = 2048px refs, best identity,\n  several times slower (ref tokens ride every step).\npreview_first_shot [OFF]: writes shot 1 to output/video/\n  H3_FIRSTSHOT/ the moment it decodes - cancel bad takes early.\n  The full path is printed to the console.\nchain_gain_control [off]: 'flatten' stops seam sharpening on long\n  chains (texture ratchets ~1.3x per join; visible past ~5 shots).\n  Recommended ON for chains longer than ~5 shots.\n\nSeam audio is automatic: the boundary cut lands in the quietest\ngap near each join, then a 40ms equal-power weld. A clipped word\nat a join means dialogue sat too close to a boundary - see the\nwriting rules.\n\nDRIFT - what is on, and what it is worth\nChained shots accrete detail: each one conditions on the\nprevious shot's own output, so invented texture compounds.\nMeasured over TEN shots at 960x544, all three of these on:\n\n  memory_frames 0   the big one. The bank's RECENT slots\n    feed accreted output forward on top of the pin. At 0\n    the only reference is shot 1, which nothing has been\n    added to yet. Luma 1.055 -> 1.022 per hop, chroma\n    1.086 -> 1.039, and the drift stops ACCELERATING\n    (4.2->6.7%/hop becomes 2.3->2.0%). Identity and\n    framing held - framing actually improved.\n  master_normalize luma+contrast   levels brightness AND\n    contrast of the finished chain to one target taken\n    from shot 1. Matching only the mean masks a contrast\n    ratchet while it compounds underneath.\n  pin_renorm on   holds each pinned latent at shot 1's\n    sigma. The pin's own sigma climbs every hop and that\n    is what the next shot is handed.\n\nResidual is about 1.02 per hop. Not zero. Long chains\nstill drift, slowly.\n\nDIALS THAT DO NOTHING HERE - verified in source, not\nguessed. Under context_pin these never fire:\n  join_anchor_noise  noises KEYFRAME latents; context_pin\n                     creates no join keyframes\n  handoff_release    belongs to continuity=latent_handoff\n  bank_ref_noise     reaches bank reference IMAGES, which\n                     measurement shows are not the carrier\nBoth are shipped at 0 so nobody tunes a dead control.\n\npin_noise is small and scene-dependent (-1% to -2% per\nhop) and worse above 0.10. Not the fix it was called in\n2.1.5."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -1866,7 +1866,7 @@
           "seed": 632747968283093,
           "steps": 20,
           "seed_per_shot": true,
-          "memory_frames": 2,
+          "memory_frames": 0,
           "anchor_frames": 1,
           "sampler_name": "euler",
           "scheduler": "beta57",
@@ -1875,9 +1875,9 @@
           "continuity": "context_pin",
           "bank_clip_frames": 22,
           "color_level": "off",
-          "join_anchor_noise": 0.002,
+          "join_anchor_noise": 0.0,
           "join_blend": true,
-          "handoff_release": 0.3,
+          "handoff_release": 0.0,
           "bank_ref_noise": 0.0,
           "end_anchor": false,
           "join_fx": "off",
@@ -1894,7 +1894,8 @@
           "upscale_model_name": "(none)",
           "master_normalize": "luma+contrast",
           "pin_frames": "22",
-          "pin_noise": 0.05
+          "pin_noise": 0.05,
+          "pin_renorm": true
         }
       },
       "widgets_values": [
@@ -1907,7 +1908,7 @@
         "randomize",
         20,
         true,
-        2,
+        0,
         1,
         "euler",
         "beta57",
@@ -1916,9 +1917,9 @@
         "context_pin",
         22,
         "off",
-        0.002,
+        0.0,
         true,
-        0.3,
+        0.0,
         0.0,
         false,
         "off",
@@ -1935,7 +1936,8 @@
         "(none)",
         "luma+contrast",
         "22",
-        0.05
+        0.05,
+        true
       ]
     },
     {
@@ -3542,6 +3544,30 @@
       },
       "widgets_values": [
         "REFERENCE IMAGES  (ref2va identity)\n\nPortraits of your character, carried into EVERY shot as <Picture 1>,\n<Picture 2>... Bind them in the prompt text - describe the person the\nsame way in every shot and the model matches them to the pictures.\n\nNeeds a ref2va checkpoint. Unlike the identity anchor above, these are\nNOT a first frame: they do not constrain shot 1's composition, they\nonly carry who the person is.\n\nThey also cover shot 1, where the memory bank is still empty - that is\nthe gap they close.\n\nGate OFF = no references, the rest of the graph is unaffected.\nOne image is fine; chain more ImageBatch nodes for a third and fourth."
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
+    },
+    {
+      "id": 54,
+      "type": "Note",
+      "pos": [
+        -40,
+        1900
+      ],
+      "size": [
+        560,
+        620
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "inputs": [],
+      "outputs": [],
+      "title": "WRITING",
+      "properties": {},
+      "widgets_values": [
+        "WRITING FOR A CLEAN CHAIN\n\nTwo rules that cost nothing and each fix a real failure\nseen in testing.\n\n1. NAME THE SIZE AND SCREEN POSITION of any prop at the\n   frame edge, in every shot's scene block.\n   \"a brass table lamp at the left edge, its shade level\n   with his shoulder, about a third the height of frame\"\n   Shot 1 is the only shot with nothing pinned behind it,\n   so it is the only one whose framing can disagree with\n   the text. Left unstated, a lamp grew 3.8x and slid\n   over ~1.7s starting exactly at the first seam, then\n   held for the remaining 37 seconds. Stating it removed\n   the shift across six arms.\n\n2. NEVER NAME A NEARBY OBJECT IN A SHOT'S CLOSING BEAT.\n   \"She glances down at the reel\" reads as a request for\n   a shot of the reel - and produced exactly that, a\n   close-up insert where the wide should have been.\n   Keep closing beats on the speaker's own body:\n   \"She settles her shoulders\", \"He turns one hand over\".\n\nBoth also protect your own measurements: texture numbers\nmean nothing once the framing breaks, because they then\ntrack content instead of drift."
       ],
       "color": "#432",
       "bgcolor": "#653"

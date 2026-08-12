@@ -1097,6 +1097,67 @@ def _scheduler_names():
         return ["simple", "normal", "beta"]
 
 
+def _mmproj_postprocess(gg_loader, vsd, label):
+    """Everything gguf_mmproj_loader does AFTER gguf_sd_loader.
+
+    The explicit-file path skipped all of it, so the vision tower loaded under
+    raw llama.cpp names (v.blk.*, mm.*) that nothing downstream consumes -
+    user-reported as a matmul shape error mid-render, cured by switching back
+    to (auto). Same file, different loader.
+
+    Uses upstream's own map and helpers rather than reimplementing the rename,
+    so if their key map changes this follows it. If their internals move, fail
+    loudly here with an instruction rather than silently returning half a
+    vision tower.
+    """
+    import torch
+    try:
+        sd_map_replace = gg_loader.sd_map_replace
+        CLIP_VISION_SD_MAP = gg_loader.CLIP_VISION_SD_MAP
+        dequantize_tensor = gg_loader.dequantize_tensor
+        is_quantized = gg_loader.is_quantized
+    except AttributeError as e:
+        raise RuntimeError(
+            f"This ComfyUI-GGUF build does not expose the vision key map "
+            f"({e}), so an explicitly chosen mmproj cannot be renamed to the "
+            f"layout the encoder expects. Set mmproj_name back to (auto) and "
+            f"keep the mmproj beside the encoder with a matching name.")
+
+    # 1. 4D patch_embd pair -> 5D
+    if "v.patch_embd.weight.1" in vsd:
+        w1 = dequantize_tensor(vsd.pop("v.patch_embd.weight"),
+                               dtype=torch.float32)
+        w2 = dequantize_tensor(vsd.pop("v.patch_embd.weight.1"),
+                               dtype=torch.float32)
+        vsd["v.patch_embd.weight"] = torch.stack([w1, w2], dim=2)
+
+    # 2. the rename that makes the tower addressable at all
+    vsd = sd_map_replace(vsd, CLIP_VISION_SD_MAP)
+
+    # 3. split q/k/v -> fused qkv
+    if "visual.blocks.0.attn_q.weight" in vsd:
+        attns = {}
+        for k, v in vsd.items():
+            if any(x in k for x in ("attn_q", "attn_k", "attn_v")):
+                k_attn, k_name = k.rsplit(".attn_", 1)
+                k_attn += ".attn.qkv." + k_name.split(".")[-1]
+                attns.setdefault(k_attn, {})[k_name] = dequantize_tensor(
+                    v, dtype=(torch.bfloat16 if is_quantized(v)
+                              else torch.float16))
+        for k, v in attns.items():
+            sfx = k.split(".")[-1]
+            vsd[k] = torch.cat([v[f"q.{sfx}"], v[f"k.{sfx}"], v[f"v.{sfx}"]],
+                               dim=0)
+
+    if not any(k.startswith("visual.") for k in vsd):
+        raise RuntimeError(
+            f"The mmproj '{label}' loaded but produced no visual.* tensors, so "
+            f"it is not a vision sidecar for this encoder. Pick the -mmproj "
+            f"file that belongs to the encoder you selected, or set "
+            f"mmproj_name to (auto).")
+    return vsd
+
+
 class H3ClipLoaderAny:
     """One dropdown for text encoders, both formats: .safetensors through
     comfy core CLIPLoader, .gguf through ComfyUI-GGUF's CLIPLoaderGGUF
@@ -1210,6 +1271,7 @@ class H3ClipLoaderAny:
                     f"mmproj_name '{mmproj_name}' is not in the "
                     f"text_encoders folder any more.")
             vsd, _ = gg_loader.gguf_sd_loader(mm_path, is_text_model=True)
+            vsd = _mmproj_postprocess(gg_loader, vsd, mmproj_name)
             print(f"[H3ClipLoader] vision sidecar (explicit): {mmproj_name}",
                   flush=True)
         else:
@@ -2253,10 +2315,24 @@ class H3MultishotMemorySampler:
                                           "label_on": "vary per shot",
                                           "label_off": "same seed every shot"}),
             "memory_frames": ("INT", {
-                "default": 2, "min": 0, "max": 3,
-                "tooltip": "RECENCY slots: how many of the most recent shots "
-                           "stay in the bank. Total bank = pinned + recent, "
-                           "capped at 3 by H3's reference limit."}),
+                "default": 0, "min": 0, "max": 3,
+                "tooltip": "RECENCY slots: how many of the most RECENT shots "
+                           "stay in the bank, on top of the pinned one. Total "
+                           "bank = pinned + recent, capped at 3 by H3's "
+                           "reference limit.\n"
+                           "DEFAULT 0, deliberately. The recent slots hand "
+                           "each shot's ACCRETED output forward as reference "
+                           "images, on top of the latent pin, so invented "
+                           "detail compounds. Measured over ten shots at "
+                           "960x544, moving 2 -> 0: texture growth 1.055 -> "
+                           "1.022 per hop, chroma 1.086 -> 1.039, framing "
+                           "correlation at shot 10 0.976 -> 0.995, and the "
+                           "drift stops ACCELERATING - 4.2%->6.7% per hop "
+                           "became 2.3%->2.0%. At 0 the only reference is "
+                           "shot 1, which nothing has been added to yet.\n"
+                           "Identity and framing held on a static scene. If a "
+                           "busy scene loses motion continuity between shots, "
+                           "raise it to 1."}),
             "anchor_frames": ("INT", {
                 "default": 1, "min": 0, "max": 9,
                 "tooltip": "Identity reference images taken from start_image, "
@@ -2617,6 +2693,26 @@ class H3MultishotMemorySampler:
                            "there. Set 0 to disable. "
                            "The noised latent conditions the next shot but "
                            "never reaches the final cut."}),
+            "pin_renorm": ("BOOLEAN", {
+                "default": True,
+                "label_on": "hold shot 1's level",
+                "label_off": "off",
+                "tooltip": "context_pin only: rescale each pinned latent so "
+                           "its standard deviation matches the FIRST "
+                           "pin's. The pin's own sigma climbs every hop "
+                           "(1.0325, 1.0368 against a 1.0220 shot-1 "
+                           "anchor), and that inflated pin is what "
+                           "conditions the next shot - so it compounds "
+                           "upstream of anything a master pass can reach. "
+                           "Measured against a matched control, same seed, "
+                           "960x544 124f x4: texture growth over the chain "
+                           "+15.1% -> +11.5%, and framing correlation to "
+                           "shot 1 held 0.985 -> 0.996 by the last shot. "
+                           "The framing gain is the bigger one and cannot "
+                           "be a metric artifact - post passes do not move "
+                           "composition. One seed, one canvas. A scalar "
+                           "rescale moves no structure, so unlike a pixel "
+                           "correction it cannot blur detail."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
@@ -2678,7 +2774,7 @@ class H3MultishotMemorySampler:
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
             upscale_model_name="(none)",
-            master_normalize="off", pin_frames="22", pin_noise=0.0):
+            master_normalize="luma+contrast", pin_frames="22", pin_noise=0.0, pin_renorm=False):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -2909,6 +3005,7 @@ class H3MultishotMemorySampler:
                     "two_pass_upscale off.")
         _cc_mu = _cc_cov = None  # house colour stats (shot 1 settled tail)
         _cp_prev = None   # context_pin: previous shot's full AV latent
+        _pin_sig0 = None  # first pin's sigma - the renorm anchor
         _cp_trim = 0
 
         if bank_pinned == 0 and n > 4:
@@ -3259,6 +3356,35 @@ class H3MultishotMemorySampler:
                           flush=True)
                 _pf = str(pin_frames) if str(pin_frames) in (
                     "5", "22", "39", "56") else "22"
+                if (pin_renorm and isinstance(_pin_src, dict)
+                        and "samples" in _pin_src):
+                    # BEFORE the noise: pin_noise is scaled to sigma, so the
+                    # renorm has to land first or it would be measuring a
+                    # sigma the noise is about to change.
+                    _zr = _pin_src["samples"]
+                    _v0 = (_zr.unbind()[0] if getattr(_zr, "is_nested", False)
+                           else _zr)
+                    _sg = float(_v0.float().std())
+                    if _pin_sig0 is None:
+                        _pin_sig0 = _sg
+                        print("[H3Memory] context_pin: pin sigma anchor %.4f "
+                              "(shot 1)" % _sg, flush=True)
+                    elif _sg > 1e-6:
+                        _k = _pin_sig0 / _sg
+                        if abs(_k - 1.0) > 1e-4:
+                            _pin_src = dict(_pin_src)
+                            if getattr(_zr, "is_nested", False):
+                                import comfy.nested_tensor as _nt2
+                                _cc = list(_zr.unbind())
+                                _cc[0] = (_cc[0].float() * _k).to(_cc[0].dtype)
+                                _pin_src["samples"] = _nt2.NestedTensor(_cc)
+                            else:
+                                _pin_src["samples"] = (
+                                    _zr.float() * _k).to(_zr.dtype)
+                            print("[H3Memory] context_pin: pin renormed "
+                                  "sigma %.4f -> %.4f (x%.4f)"
+                                  % (_sg, _pin_sig0, _k), flush=True)
+
                 if (pin_noise > 0 and isinstance(_pin_src, dict)
                         and "samples" in _pin_src):
                     # noised clean condition, applied to the carrier. The pin
@@ -3375,6 +3501,26 @@ class H3MultishotMemorySampler:
                 # of the pack. (An is_nested check here silently no-ops -
                 # render-verified failure.)
                 _ms_obj = model.get_model_object("model_sampling")
+                # ComfyUI 0.32.0+ (ModelSamplingAV) carries the AUDIO half of
+                # the pack SCALED onto the video schedule:
+                # model_base.process_latent_in multiplies the audio slice by
+                # shift/audio_shift - 12/3 = 4 for H3 - and divides it back on
+                # the way out. Everything we inject below is in the stream's
+                # NATIVE domain (straight from audio_vae.encode, or from a
+                # sampler output that has already been divided back), so it
+                # must be multiplied up before being written into x.
+                # User-reported as "the Audio Spine outputs static" on 0.32.0,
+                # with voice_ref - which never touches the sampler's latent -
+                # fine on the same file. 0.30.0 has no such scaling and
+                # getattr's 1.0 default leaves it byte-identical.
+                try:
+                    _asc = float(getattr(_ms_obj, "audio_scale", 1.0) or 1.0)
+                except Exception:
+                    _asc = 1.0
+                if abs(_asc - 1.0) > 1e-6:
+                    print("[H3Memory] audio injections scaled x%.3f onto the "
+                          "sampler's audio domain (ModelSamplingAV)" % _asc,
+                          flush=True)
                 # THE TWO CLOCKS: H3 video rides the sampler's shift-12
                 # sigma; the audio stream lives on a shift-3 schedule
                 # internally. An audio lock injected at the VIDEO sigma is
@@ -3400,6 +3546,7 @@ class H3MultishotMemorySampler:
                                     / 24.0 * 40.0))
                     _a0 = max(0, min(_a0, max(0, _spine.shape[-1] - 1)))
                     _spine_seg = _spine[..., _a0:_a0 + _ashape[-1]]
+
                 _Nv = 1
                 for _d in _vshape[1:]:
                     _Nv *= _d
@@ -3417,7 +3564,7 @@ class H3MultishotMemorySampler:
                         _r0=_HO_R0, _tss=_tss, _shv=_shv, _sha=_sha,
                         _tp=int(handoff_taper), _tsrc=_ho_taper_src,
                         _rel=float(handoff_release), _vs=_vshape,
-                        _as=_ashape, _Nv=_Nv, _Na=_Na,
+                        _as=_ashape, _Nv=_Nv, _Na=_Na, _asc=_asc,
                         _state={"logged": False}):
                     try:
                         sig = float(timestep.flatten()[0])
@@ -3474,7 +3621,8 @@ class H3MultishotMemorySampler:
                                 # Injected at the AUDIO clock.
                                 xa = x[:, 0, _Nv:_Nv + _Na].reshape(
                                     (x.shape[0],) + _as[1:])
-                                ts = _hs.to(device=x.device, dtype=x.dtype)
+                                ts = _hs.to(device=x.device,
+                                            dtype=x.dtype) * _asc
                                 _nn = min(ts.shape[-1], xa.shape[-1])
                                 xa[..., :_nn] = _ms.noise_scaling(
                                     sta, torch.randn_like(ts[..., :_nn]),
@@ -3482,11 +3630,12 @@ class H3MultishotMemorySampler:
                             elif _Na and _al and _ha is not None:
                                 xa = x[:, 0, _Nv:_Nv + _Na].reshape(
                                     (x.shape[0],) + _as[1:])
-                                ta = _ha.to(device=x.device, dtype=x.dtype)
+                                ta = _ha.to(device=x.device,
+                                            dtype=x.dtype) * _asc
                                 if _hg is not None:
                                     ta = torch.cat(
                                         [ta, _hg.to(device=x.device,
-                                                    dtype=x.dtype)],
+                                                    dtype=x.dtype) * _asc],
                                         dim=-1)
                                 xa[..., :ta.shape[-1]] = _ms.noise_scaling(
                                     sta, torch.randn_like(ta), ta)

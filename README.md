@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.6 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.1.7 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,110 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.1.7
+
+Three things that stopped the workflow running. All user-reported, all
+reproduced, all fixed and verified by render rather than by reading the code.
+
+**Everything below was verified on ComfyUI 0.32.0**, not just 0.30.0. Two of
+these three only ever appear on 0.32, which is why they survived several
+releases.
+
+### Fixed: the Audio Spine produced static on ComfyUI 0.32.0
+
+`guide_audio` came out as hiss while the same file through `voice_ref` or the
+native node was perfect. Reported against 2.1.2, still present through 2.1.6.
+
+ComfyUI 0.32.0 introduced `ModelSamplingAV`, which carries the **audio half of
+the packed AV latent scaled onto the video schedule** — `process_latent_in`
+multiplies it by `shift / audio_shift` (12/3 = **4** for H3) and
+`process_latent_out` divides it back. Everything this pack injects into the
+sampler's latent is in the stream's *native* domain, so on 0.32 it landed 4x
+too small and decoded as broadband noise. On 0.30.0 there is no such scaling,
+so the same code was correct — which is why it never reproduced here until a
+0.32 rig existed.
+
+Three injection sites had it, not one:
+
+| source | used by |
+|---|---|
+| the encoded spine | Audio Spine |
+| the previous shot's audio tail | `audio_lock`, latent handoff |
+| the encoded room tone | onset guard |
+
+All three now scale at the point of use, reading the factor off the live
+`model_sampling` object so a changed sigma shift stays correct. `getattr`'s 1.0
+default leaves 0.30.0 byte-identical.
+
+Verified on 0.32.0 with a real 44.1 kHz stereo voice track: loudness-envelope
+correlation against the guide **+0.965**, speech-band energy 34.2% against the
+guide's 39.3%, and a blind listener transcribing the guide's words with "clean,
+no background hiss". Before the fix the same render was hiss.
+
+### Fixed: naming an mmproj file broke GGUF encoders
+
+    mat1 and mat2 shapes cannot be multiplied (3680x1152 and 3456x1152)
+
+thrown at the handoff into shot 2, GGUF encoders only, unaffected by resolution
+or by turning every image input off.
+
+Setting `mmproj_name` explicitly took a different code path than `(auto)` and
+skipped the vision key-renaming step entirely — so the vision tower loaded
+under raw llama.cpp names (`v.blk.*`, `mm.*`) that nothing downstream reads,
+the merger was never populated, and the first matmul touching vision features
+had the wrong width. Same file, two loaders, **19 key names in common out of
+351**.
+
+The bitter part: `mmproj_name` is documented as the reliable escape hatch for
+when filename pairing fails, and it was the broken path.
+
+It now runs the same post-processing as `(auto)`, using ComfyUI-GGUF's own key
+map rather than a copy, so it follows their changes. Verified: an explicitly
+named file now yields a state dict identical to `(auto)` — 351 tensors, every
+shape matching. A new guard also fails by name if a chosen mmproj produces no
+`visual.*` tensors, instead of dying in a matmul twenty minutes later.
+
+### Fixed: `The value 1 for reference_image_size is not available`
+
+The shipped workflow's saved widget values were written for a layout that did
+not present `sampler_override` and `scheduler_override` as widgets. The current
+schema does, so everything from index 27 read two slots early and
+`output_scale`'s `1.0` landed in `reference_image_size`, a combo of
+`match`/`max`. This affected **2.1.3, 2.1.4 and 2.1.5**.
+
+The array is now generated from a name→value map resolved against
+`/object_info`, and the same map is stored in the node's properties so the
+pack's own JS can re-apply by name if a future schema change shifts anything.
+
+### Also: `memory_frames` now defaults to 0
+
+The bank's *recent* slots hand each shot's accreted output forward as reference
+images on top of the latent pin, so invented detail compounds. Measured over ten
+shots at 960x544, moving 2 → 0:
+
+| | 2 | 0 |
+|---|---|---|
+| texture per hop | 1.055 | **1.022** |
+| chroma per hop | 1.086 | **1.039** |
+| framing correlation at shot 10 | 0.976 | **0.995** |
+| drift acceleration | 4.2% → 6.7%/hop | **2.3% → 2.0%/hop** |
+
+The last row matters most: at 2 the drift *accelerates*, which is what a runaway
+loop looks like. At 0 it holds flat.
+
+The obvious worry was motion continuity, since the recency slots exist to carry
+it. Tested on a scene with continuous large-amplitude movement: anchor-only
+retained motion **slightly better** (−5.9% vs −6.5% over four shots) with better
+framing (0.983 vs 0.971). The cost does not exist. If a busy scene ever does
+lose continuity between shots, raise it to 1.
+
+`join_anchor_noise` and `handoff_release` now ship at 0 — both are **inert**
+under `context_pin` (one noises keyframes the mode never creates, the other
+belongs to `latent_handoff`) and non-zero values read as tuned settings while
+doing nothing.
 
 ---
 
