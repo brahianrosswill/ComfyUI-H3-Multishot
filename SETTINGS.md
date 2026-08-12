@@ -107,6 +107,8 @@ render-verified. It is gone.
 |---|---|---|
 | `output_scale` | `1.0` (off) | Lanczos resize of each shot's finished frames. Adds resolution, **not** detail. Works with every continuity mode including `context_pin`, because it is downstream of the VAE. Measured: rendering at 448x256 with `output_scale 1.5` reached 672x384 in 45.5s against 80.9s rendering 672x384 natively - **1.78x faster, and visibly softer**; concrete pore texture that survives a native render washes out. Use it when the clock matters, or when the whole-chain upscale would not fit in memory; render native when texture matters. |
 | `upscale_model` | unwired | Optional `UPSCALE_MODEL` link (ComfyUI's Load Upscale Model - ESRGAN and friends) to synthesise detail rather than resize. Applied per shot at the model's own factor; combine with `output_scale` to land on an exact size. Render-verified with RealESRGAN x2plus (448x256 -> 896x512, and combined with `output_scale` landing exactly on 672x384). |
+| `master_normalize` | `off` | Deflicker the FINISHED chain: every frame driven to ONE global luma target, after the master exists — outside the feedback loop, so it cannot create a seam. Unit-verified: a 3-shot chain drifting +22% luma with +0.052 steps at the joins came out flat (+0.0%) with steps of +0.00001. Brightness only; texture drift is not fixable after the fact. |
+| `upscale_model_name` | `(none)` | Pick an upscale model by name instead of wiring a loader — same behaviour as the `upscale_model` input, which wins if both are set. Reads `models/upscale_models/`. |
 
 Both are applied **per shot**, after the memory bank has taken its
 base-resolution reference clip. That keeps the conditioning payload and its VRAM
@@ -120,7 +122,6 @@ three-hour render (issue #13).
 |---|---|---|
 | `preview_first_shot` | `off` | Writes shot 1 to `output/video/H3_FIRSTSHOT/` the moment it decodes — minutes before the chain finishes — so a bad take can be cancelled early. The full path is printed to the console. |
 | `save_every_shot` | `off` | Writes **every** shot to `output/video/H3_SHOTS/` as it decodes, alongside the master. Insurance for long chains: anything that fails after the last shot — a mux OOM, a full disk, a closed tab — otherwise destroys the entire render at once. Files are written *before* the seam trim, so consecutive shots overlap by about a second; the master is still the clean join. |
-| `audio_tone_control` | `off` | Audio twin of `chain_gain_control`, aimed the other way: chained audio drifts **duller** per hop where video drifts sharper (measured: 8-shot chains lose 8–50% (seed-dependent) of their 4–10 kHz energy even with the pinned bank slot, 84–92% without it). `flatten` EQ-matches every shot's long-term spectral envelope to shot 1's before the weld — constant per-shot gains, a linear filter so no pumping, clamped ±9 dB, half-strength in the top band so it cannot manufacture hiss. |
 | `sigmas` | unwired | Optional custom sigma schedule (a `SIGMAS` link, no widget). Replaces sampler/scheduler + steps entirely — some turbo LoRAs ship a schedule they need in order to work at all. When connected, `steps` becomes `len(sigmas)-1`, the two-pass split is taken as a fraction of *your* curve, and the console says the steps/scheduler widgets are being ignored. |
 | `reference_image_size` | `match` | `max` uses 2048 px references for best identity fidelity, but reference tokens ride through every sampling step, so it can be several times slower. |
 | `seed` | randomize | Fix it to make a good take reproducible. |
@@ -129,19 +130,26 @@ three-hour render (issue #13).
 A/B (2026-08-11, 8-shot chains): with `bank_pinned=0` the conditioning is pure
 recency — each shot hears only the one before it — and the voice band collapses
 (84–92% of 4–10 kHz energy gone by shot 8). With the default pinned slot the
-drift is 8–13%. Continuity mode is irrelevant to this; the bank decides. There
-is no true "bank off": `memory_frames=0, bank_pinned=0` still leaves one
-recency slot, which is the *worst* configuration, and the node warns about it
-on chains past 4 shots. Keep `bank_pinned` at 1 and use
-`audio_tone_control=flatten` to level the residual drift.
+drift is 8–50%, depending on seed. Continuity mode is irrelevant to this; the
+bank decides. There is no true "bank off": `memory_frames=0, bank_pinned=0`
+still leaves one recency slot, which is the *worst* configuration, and the node
+warns about it on chains past 4 shots. Keep `bank_pinned` at 1. The per-shot
+audio leveller that once sat here has been removed — it corrected the decoded
+audio while the raw-latent pin carried the drift forward untouched, which is
+the same flaw that made the picture dials fail.
 
-**The three drift dials.** Every chained lane drifts the same way — the model
-regenerating from its own output, compounding per hop — and each lane has its
-counter, all render-verified: texture ratchets *up* (`chain_gain_control=
-flatten`), the audio spectrum drifts *down* (`audio_tone_control=flatten`),
-and luminance drifts *down* (`color_level=mvgd`: measured −10.5 YAVG over 8
-shots uncorrected, **−1.0 corrected**, both seeds). On chains past ~5 shots,
-turn all three on.
+**Drift, and what actually works on it (corrected 2026-08-12).** Every chained
+lane drifts — texture up, luminance and audio spectrum down — because the model
+regenerates from its own output. But **per-shot correction does not fix it**: a
+render with every per-shot dial ON measured **+142% texture and +18% luma** over
+three shots with a step at each join. Under `context_pin` the drift rides the
+**raw latent pin**, which is stored before decode, and every per-shot dial
+operates on decoded frames — they fix the picture you see, not the thing that
+feeds forward. What works is correction *outside* the loop, on the finished
+master, driven to ONE global target: `color_level=scene` for colour and
+`master_normalize=luma` for brightness. Neither can create a seam, because
+every frame lands on the same number. Texture is the one lane with no honest
+after-the-fact fix — blur is the only lever and it destroys real detail.
 
 **Best-audio recipe (cut-grammar content):** `continuity=cut` +
 `bank_pinned=1, memory_frames=0` - a bank of exactly one slot, shot 1,

@@ -78,6 +78,72 @@ def _repair_json(text):
 _AT_NBANDS = 8
 
 
+def _up_model_list():
+    try:
+        import folder_paths
+        return folder_paths.get_filename_list("upscale_models")
+    except Exception:
+        return []
+
+
+def _load_up_model(name):
+    import comfy.utils, folder_paths
+    from spandrel import ModelLoader
+    sd = comfy.utils.load_torch_file(
+        folder_paths.get_full_path_or_raise("upscale_models", name),
+        safe_load=True)
+    if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
+        sd = comfy.utils.state_dict_prefix_replace(sd, {"module.": ""})
+    return ModelLoader().load_from_state_dict(sd).eval()
+
+
+def _mn_normalize(parts, mode, med=9):
+    """Level luma across the WHOLE assembled chain, to ONE global target.
+
+    Deflicker over the finished timeline. Two design points, both learned the
+    hard way:
+
+    * ONE GLOBAL target, not a rolling or smoothed-local one. The per-shot
+      colour mode drives each shot to a rolling house and leaves a hard step
+      at every join (measured 29% warmth). A smoothed-local target is no
+      better for chained video: a shot boundary is a STEP, a wide smoothing
+      window turns it into a ramp, and the gain then ramps with it instead of
+      cancelling it (unit-tested: a 15% step came out 13.5%). Driving every
+      frame to a single number removes steps by construction, because every
+      frame lands on the same number.
+    * LUMA ONLY. Texture drift cannot be fixed here. Blur is the only lever
+      available after the fact, and blur removes real detail along with the
+      model's invented detail - it satisfies a metric by destroying
+      information. A ratcheting chain wants a shorter chain, an anchor-only
+      conditioning diet, or a model-side fix; it does not want a filter.
+
+    A short median tracks the actual level rather than reacting to single-frame
+    noise. Gain is clamped so nothing is invented and black stays black.
+    """
+    import torch
+    if mode == "off" or not parts:
+        return parts, ""
+    frames = torch.cat(parts, dim=0)
+    n = frames.shape[0]
+    if n < 8:
+        return parts, ""
+    luma = frames.mean(dim=(1, 2, 3))
+    k = max(3, min(int(med) | 1, (n // 2) * 2 - 1)); pad = k // 2
+    med_l = torch.nn.functional.pad(luma[None, None], (pad, pad),
+                                    mode="replicate")[0, 0].unfold(0, k, 1).median(-1).values
+    target = luma.median()
+    gain = (target / med_l.clamp_min(1e-4)).clamp(0.70, 1.43)
+    out = (frames * gain[:, None, None, None]).clamp(0, 1)
+    res, i = [], 0
+    for p in parts:
+        res.append(out[i:i + p.shape[0]]); i += p.shape[0]
+    after = torch.cat(res, 0).mean(dim=(1, 2, 3))
+    msg = ("luma %.3f-%.3f -> %.3f-%.3f (target %.3f, gain %.3f-%.3f)"
+           % (float(luma.min()), float(luma.max()), float(after.min()),
+              float(after.max()), float(target), float(gain.min()), float(gain.max())))
+    return res, msg
+
+
 def _at_ltas(wav, sr=32000, nfft=2048):
     """Long-term average spectrum of a [C, L] / [1, C, L] waveform in
     _AT_NBANDS log-spaced bands (100 Hz .. ~12 kHz). Long-term, so per-shot
@@ -2198,14 +2264,17 @@ class H3MultishotMemorySampler:
                            "each shot (JoyEcho stores a clip, not a single "
                            "frame). Reference rows cost time on every sampling "
                            "step, so keep this small: 22 is ~0.9s."}),
-            "color_level": (["off", "mvgd", "scene"], {
+            "color_level": (["off", "scene", "mvgd"], {
                 "default": "off",
-                "tooltip": "Level every shot's colour/exposure statistics to "
-                           "shot 1's settled tail (FIXED reference - chained "
-                           "matching re-accumulates drift). Runs BEFORE the "
-                           "join anchor and bank are taken from the shot, so "
-                           "the next shot inherits corrected statistics. "
-                           "Kills the exposure step at joins deterministically."}),
+                "tooltip": "Colour drift across a chain. 'scene' is the one to "
+                           "use: ONE reference for the whole piece, applied "
+                           "per frame at the very end, so every shot is pulled "
+                           "to the same target and there is no step at any "
+                           "join. 'mvgd' is DEPRECATED - it matches each shot "
+                           "to a rolling house and leaves a hard step at every "
+                           "seam (measured 29% warmth step; a render with it "
+                           "on drifted +18% brighter over three shots). It is "
+                           "kept only so saved graphs still load."}),
             "join_anchor_noise": ("FLOAT", {
                 "default": 0.0, "min": 0.0, "max": 0.05, "step": 0.005,
                 "tooltip": "Mix this much seeded noise into every join "
@@ -2396,18 +2465,29 @@ class H3MultishotMemorySampler:
                            "trim, so consecutive files overlap by ~1s; the "
                            "master is still the clean join. Costs one file "
                            "write per shot."}),
-            "audio_tone_control": (["off", "flatten"], {
+            "upscale_model_name": (["(none)"] + _up_model_list(), {
+                "default": "(none)",
+                "tooltip": "Pick an upscale model by name instead of wiring "
+                           "one - same thing the upscale_model input does, "
+                           "without the loader node. Synthesises detail rather "
+                           "than resizing, per shot, at the model's own factor; "
+                           "set output_scale as well to land on an exact size. "
+                           "A wired upscale_model input wins if both are set."}),
+            "master_normalize": (["off", "luma"], {
                 "default": "off",
-                "tooltip": "Audio twin of chain_gain_control, aimed the other "
-                           "way: chained audio drifts DULLER per hop where "
-                           "video drifts sharper. Measured on 8-shot chains: "
-                           "4-10 kHz energy fell 8-13% even with the pinned "
-                           "bank slot, and 84-92% without it (bank_pinned=0). "
-                           "'flatten' EQ-matches every shot's long-term "
-                           "spectral envelope to shot 1's before the weld - "
-                           "constant per-shot gains (a linear filter, no "
-                           "pumping), clamped to +/-9 dB, half-strength in "
-                           "the top band so it cannot manufacture hiss."}),
+                "tooltip": "Deflicker the FINISHED chain: every frame driven "
+                           "to ONE global luma target, after the master "
+                           "exists. Per-shot correction cannot work here - it "
+                           "never reaches the raw-latent pin that carries the "
+                           "drift, and correcting shots against a rolling "
+                           "target leaves a step at every join (measured: all "
+                           "per-shot dials ON still gave +142% texture and "
+                           "+18% luma over three shots). This runs outside the "
+                           "feedback loop and lands every frame on the same "
+                           "number, so it cannot create a seam. Brightness "
+                           "only: texture drift is NOT fixable after the fact, "
+                           "because the only lever is blur and blur destroys "
+                           "real detail along with the invented kind."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
@@ -2445,7 +2525,8 @@ class H3MultishotMemorySampler:
             self_anchor_voice=False, reference_image_size="match",
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
-            upscale_model=None, audio_tone_control="off"):
+            upscale_model=None, upscale_model_name="(none)",
+            master_normalize="off"):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -2604,6 +2685,9 @@ class H3MultishotMemorySampler:
         bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
         frames_parts, audio_parts = [], []
         _lat_v_parts, _lat_a_parts = [], []   # issue #12: raw per-shot latents
+        if upscale_model is None and upscale_model_name not in ("(none)", "", None):
+            upscale_model = _load_up_model(upscale_model_name)
+            print("[H3Memory] upscale model: %s" % upscale_model_name, flush=True)
         sr = None
         _cg_ref = None
         _CG_WIN = 24
@@ -2660,7 +2744,6 @@ class H3MultishotMemorySampler:
                     "is two trajectories. Disconnect guide_audio, or turn "
                     "two_pass_upscale off.")
         _cc_mu = _cc_cov = None  # house colour stats (shot 1 settled tail)
-        _at_house = None         # house audio envelope (shot 1)
         _cp_prev = None   # context_pin: previous shot's full AV latent
         _cp_trim = 0
 
@@ -2670,7 +2753,7 @@ class H3MultishotMemorySampler:
                   "each shot hears only the one before it - and audio "
                   "COLLAPSES: measured 84-92%% loss of 4-10 kHz energy by "
                   "shot 8 (five-arm A/B, 2026-08-11). Set bank_pinned=1, "
-                  "and consider audio_tone_control=flatten." % n, flush=True)
+                  "and keep chains short if the voice matters." % n, flush=True)
         print(f"[H3Memory] JoyEcho-style memory bank: no keyframe, "
               f"{bank_pinned} pinned + {cap - min(bank_pinned, cap)} recent "
               f"slot(s), {_jb_grid(bank_clip_frames)}f clips. Needs a ref2va "
@@ -3282,17 +3365,15 @@ class H3MultishotMemorySampler:
                     print("[H3Memory] colour levelled to house", flush=True)
 
 
-            if audio_tone_control == "flatten":
-                if si == 0:
-                    _at_house = _at_ltas(wav, sr)
-                    print("[H3Memory] audio tone: house envelope set "
-                          "(shot 1)", flush=True)
-                elif _at_house is not None:
-                    wav, _gmax = _at_flatten(wav, _at_house, sr)
-                    if _gmax > 0:
-                        print("[H3Memory] audio tone: levelled to house "
-                              "(max band gain %.1f dB)" % _gmax, flush=True)
-
+            if (si == 0 and chain_gain_control != "off"
+                    and continuity in ("context_pin", "latent_handoff")):
+                print("[H3Memory] NOTE: chain_gain_control corrects the "
+                      "decoded frames and the bank, but continuity=%s carries "
+                      "the previous shot's RAW LATENTS, which it cannot reach "
+                      "- the texture ratchet rides the pin regardless "
+                      "(measured +142%% over 3 shots with flatten ON). It is "
+                      "effective on frame-carried modes (first_frame, cut)."
+                      % continuity, flush=True)
             if chain_gain_control != "off":
                 _w = min(_CG_WIN, imgs.shape[0])
                 if si == 0:
@@ -3636,6 +3717,12 @@ class H3MultishotMemorySampler:
               % (tuple(_lat_v["samples"].shape),
                  tuple(_lat_a["samples"].shape) if _lat_a_parts else "none",
                  _cp_trim), flush=True)
+
+        if master_normalize != "off":
+            frames_parts, _mn_msg = _mn_normalize(frames_parts, master_normalize)
+            if _mn_msg:
+                print("[H3Memory] master normalize (%s): %s"
+                      % (master_normalize, _mn_msg), flush=True)
 
         master = torch.cat(frames_parts, dim=0)
         # always the short 40ms weld: a long crossfade CONSUMES its overlap,

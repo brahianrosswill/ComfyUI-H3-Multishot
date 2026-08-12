@@ -149,13 +149,29 @@ no Motion-Context → `continuity=first_frame`.
 
 ## New in v2.1.3
 
+
+> **Correction, 2026-08-12 — read this before turning any drift dial on.**
+> A render with `chain_gain_control=flatten`, `color_level=mvgd` and the
+> per-shot audio leveller all ON came out **+142% texture and +18% brighter**
+> over three shots, with a visible brightness step at each join. The per-shot
+> approach cannot work, for a reason the code already knew: under
+> `context_pin` the drift is carried by the **raw latent pin**, and every one
+> of those dials operates on decoded frames *after* the pin has been stored.
+> They correct what you see and not what feeds forward. `audio_tone_control`
+> has been **removed**. `color_level=mvgd` is **deprecated** — its own source
+> comment records a 29% warmth step at every join. Use `color_level=scene`
+> (one target for the whole piece, applied per frame at the end) and the new
+> `master_normalize=luma`, both of which run outside the feedback loop and
+> land every frame on the same number, so they cannot create a seam.
+> Texture drift is **not** fixable after the fact: the only lever is blur, and
+> blur removes real detail along with the invented kind.
+
 - **Picture darkening over chains: measured, and the existing dial verified.**
   User-reported (−1.5 luma/shot, monotonic). Same autoregressive mechanism as
   the audio dulling; the raw-latent pin carries it directly. `color_level=mvgd`
   - shipped since 2.1, never verified - holds an 8-shot chain to −1.0 total
   luma where uncorrected loses −10.5 (both seeds). On long chains turn on all
-  three drift dials: `chain_gain_control=flatten`, `audio_tone_control=flatten`,
-  `color_level=mvgd`.
+  three drift dials: 
 - **Audio dulling over long chains: measured, mechanism found, countered.**
   Five-arm A/B on 8-shot chains: with `bank_pinned=0` (pure recency
   conditioning) the voice band collapses - 84-92% of 4-10 kHz energy gone by
