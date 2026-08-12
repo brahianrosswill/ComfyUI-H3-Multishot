@@ -135,6 +135,14 @@ recency slot, which is the *worst* configuration, and the node warns about it
 on chains past 4 shots. Keep `bank_pinned` at 1 and use
 `audio_tone_control=flatten` to level the residual drift.
 
+**The three drift dials.** Every chained lane drifts the same way — the model
+regenerating from its own output, compounding per hop — and each lane has its
+counter, all render-verified: texture ratchets *up* (`chain_gain_control=
+flatten`), the audio spectrum drifts *down* (`audio_tone_control=flatten`),
+and luminance drifts *down* (`color_level=mvgd`: measured −10.5 YAVG over 8
+shots uncorrected, **−1.0 corrected**, both seeds). On chains past ~5 shots,
+turn all three on.
+
 **Best-audio recipe (cut-grammar content):** `continuity=cut` +
 `bank_pinned=1, memory_frames=0` - a bank of exactly one slot, shot 1,
 forever. Every shot is then a fresh generation whose only audio reference is
