@@ -87,14 +87,31 @@ def _up_model_list():
 
 
 def _load_up_model(name):
-    import comfy.utils, folder_paths
-    from spandrel import ModelLoader
-    sd = comfy.utils.load_torch_file(
-        folder_paths.get_full_path_or_raise("upscale_models", name),
-        safe_load=True)
-    if "module.layers.0.residual_group.blocks.0.norm1.weight" in sd:
-        sd = comfy.utils.state_dict_prefix_replace(sd, {"module.": ""})
-    return ModelLoader().load_from_state_dict(sd).eval()
+    """Load an upscale model by NAME, through ComfyUI's own loader node.
+
+    Do not reimplement this. The first version here copied the loader's body
+    from an older ComfyUI - state dict, spandrel, eval() - and missed that the
+    current one also attaches a CoreModelPatcher, which ImageUpscaleWithModel
+    then reads as upscale_model.patcher.load_device. It crashed AFTER shot 1
+    had rendered. Calling the real node means this cannot drift out of sync
+    with whatever ComfyUI does next.
+    """
+    from comfy_extras.nodes_upscale_model import UpscaleModelLoader
+    out = UpscaleModelLoader().load_model(name)
+    # the V3 node API returns a NodeOutput; older returns a plain tuple
+    for attr in ("result", "results"):
+        if hasattr(out, attr):
+            out = getattr(out, attr)
+            break
+    while isinstance(out, (tuple, list)):
+        out = out[0]
+    if not hasattr(out, "patcher"):
+        raise RuntimeError(
+            "upscale_model_name=%r loaded, but the result has no .patcher - "
+            "ComfyUI's upscale loader has changed shape again. Wire a Load "
+            "Upscale Model node instead, or set upscale_model_name to "
+            "(none)." % name)
+    return out
 
 
 def _mn_normalize(parts, mode, med=9):
@@ -283,7 +300,22 @@ def _upscale_frames(imgs, scale, model, tag):
     h, w = int(imgs.shape[1]), int(imgs.shape[2])
     if model is not None:
         from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
+        import comfy.model_management as _mm
         imgs = ImageUpscaleWithModel().upscale(model, imgs)[0]
+        # Free it AT ONCE. Left resident it survives into the next shot, and
+        # the DiT can then only load partially - measured 18.5 s/it on shot 1
+        # (full load) against 349 s/it on shot 2 (431 MB offloaded), a 19x
+        # collapse from ~65 MB of upscaler weights holding the door open.
+        try:
+            _mm.free_memory(_mm.get_total_memory(_mm.get_torch_device()),
+                            _mm.get_torch_device(), [getattr(model, "patcher", None)])
+            if hasattr(model, "patcher"):
+                model.patcher.model.to(_mm.unet_offload_device())
+            _mm.soft_empty_cache()
+        except Exception as _e:
+            print("[%s] upscale: could not free the upscaler (%s) - the next "
+                  "shot may load the DiT partially and run far slower"
+                  % (tag, _e), flush=True)
         print("[%s] upscale: model %dx%d -> %dx%d" %
               (tag, w, h, int(imgs.shape[2]), int(imgs.shape[1])), flush=True)
         if scale and abs(scale - 1.0) > 1e-6:
@@ -486,6 +518,8 @@ _AUTO_FLOOR = 8 * 1024**3          # never reserve less: workspaces + margin
 _AUTO_FRACTION = 0.88              # unmeasured shapes: fraction of free VRAM
 _AUTO_WEIGHT_NUCLEUS = 2 * 1024**3  # always leave a little room for weights
 _AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
+_AUTO_KEEPOUT = 384 * 1024**2      # left free beyond weights+pool (fragmentation)
+_AUTO_MIN_POOL = 1536 * 1024**2    # below this, prefer a loud OOM to a silent crawl
 _auto_cache = None                 # lazy {key: pool_bytes}
 _auto_last = {"key": None, "model": None}   # what the next sampling run is
 _auto_session = {}                 # key -> reserve pinned for this session
@@ -580,7 +614,7 @@ def _install_auto_reserve(patcher, model_name):
         if pinned is not None:
             return pinned
         cache = _auto_cache_load()
-        measured = cache.get(key)
+        measured = cache.get(key) or 0
         if measured:
             # a real measurement carries its own x1.25 margin - the old
             # 8 GB floor here overrode good small measurements and forced
@@ -612,6 +646,35 @@ def _install_auto_reserve(patcher, model_name):
                               _AUTO_FLOOR)
                 how = (f"first run at this shape: "
                        f"{_AUTO_FRACTION:.0%} of free")
+        # CLAMP AGAINST THE CARD. Every GB reserved here comes out of the
+        # weights budget, and a DiT that misses a FULL load streams the
+        # remainder over PCIe every step. Measured 2026-08-12 at 960x544:
+        # shot 1 reserved 7.8 GB and loaded completely at 18.8 s/it; shot 2's
+        # larger payload reserved 9.4 GB, left the DiT 399 MB short, and ran
+        # at 283 s/it - a 15x collapse bought by 1.6 GB of headroom the
+        # measurement said was not needed. The failure modes are asymmetric:
+        # too small OOMs loudly and you fix it, too large silently costs 15x.
+        # So the pool yields to the weights, never the other way round.
+        try:
+            import comfy.model_management as _cm
+            _dev = _cm.get_torch_device()
+            _free = _cm.get_free_memory(_dev)
+            _w = int(patcher.model_size())
+            _cap = int(_free - _w - _AUTO_KEEPOUT)
+            if _cap > 0 and reserve > _cap:
+                _was = reserve
+                reserve = max(_cap, _AUTO_MIN_POOL)
+                how += (" | CLAMPED %.1f -> %.1f GB so the weights (%.1f GB) "
+                        "still load completely out of %.1f GB free"
+                        % (_was / 2**30, reserve / 2**30, _w / 2**30,
+                           _free / 2**30))
+                if measured and reserve < measured:
+                    how += (" [tight: below the measured pool %.1f GB - if this"
+                            " OOMs, lower the resolution or the reference count"
+                            " rather than raising the reserve]"
+                            % (measured / 2**30))
+        except Exception:
+            pass
         _auto_session[key] = reserve
         print(f"[H3AutoReserve] shape cells={cells}: reserving "
               f"{reserve/2**30:.1f} GB ({how})", flush=True)
@@ -2435,15 +2498,6 @@ class H3MultishotMemorySampler:
                            "context_pin, because it happens after sampling. "
                            "The memory bank still stores base-resolution "
                            "clips, so conditioning and VRAM are unchanged."}),
-            "upscale_model": ("UPSCALE_MODEL", {
-                "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
-                           "(ESRGAN and friends) to synthesise detail instead "
-                           "of merely resizing. Applied per shot after decode, "
-                           "at the model's own factor; if output_scale is also "
-                           "set, the result is resized to land exactly there. "
-                           "Slower than output_scale and it invents texture - "
-                           "on a chain, judge it on the LAST shot, where any "
-                           "texture ratchet is worst."}),
             "sigmas": ("SIGMAS", {
                 "tooltip": "Optional custom sigma schedule, replacing "
                            "sampler/scheduler + steps entirely. Some turbo "
@@ -2472,7 +2526,8 @@ class H3MultishotMemorySampler:
                            "without the loader node. Synthesises detail rather "
                            "than resizing, per shot, at the model's own factor; "
                            "set output_scale as well to land on an exact size. "
-                           "A wired upscale_model input wins if both are set."}),
+                           "Reads models/upscale_models/, the same folder "
+                           "ComfyUI's own Load Upscale Model reads."}),
             "master_normalize": (["off", "luma"], {
                 "default": "off",
                 "tooltip": "Deflicker the FINISHED chain: every frame driven "
@@ -2525,7 +2580,7 @@ class H3MultishotMemorySampler:
             self_anchor_voice=False, reference_image_size="match",
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
-            upscale_model=None, upscale_model_name="(none)",
+            upscale_model_name="(none)",
             master_normalize="off"):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
@@ -2685,9 +2740,21 @@ class H3MultishotMemorySampler:
         bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
         frames_parts, audio_parts = [], []
         _lat_v_parts, _lat_a_parts = [], []   # issue #12: raw per-shot latents
-        if upscale_model is None and upscale_model_name not in ("(none)", "", None):
-            upscale_model = _load_up_model(upscale_model_name)
-            print("[H3Memory] upscale model: %s" % upscale_model_name, flush=True)
+        upscale_model = None
+        if upscale_model_name not in ("(none)", "", None):
+            # load it NOW, before a single step is sampled. The first version
+            # of this loader raised inside the per-shot upscale, i.e. AFTER
+            # shot 1 had rendered - six minutes of GPU burned to reach a
+            # failure that was knowable at zero.
+            try:
+                upscale_model = _load_up_model(upscale_model_name)
+            except Exception as _e:
+                raise RuntimeError(
+                    "upscale_model_name=%r could not be loaded: %s. Fix the "
+                    "name or set it to (none) - failing now rather than after "
+                    "the first shot has rendered." % (upscale_model_name, _e))
+            print("[H3Memory] upscale model: %s (loaded and verified)"
+                  % upscale_model_name, flush=True)
         sr = None
         _cg_ref = None
         _CG_WIN = 24
@@ -3114,12 +3181,30 @@ class H3MultishotMemorySampler:
                     clip.patcher.model.to(_mm.text_encoder_offload_device())
                 except Exception:
                     pass
+                # The VAEs are dead weight during sampling - encode already
+                # happened, decode has not. They were staying resident (5.5 GB
+                # between them) while the DiT loaded, and on shot 2+ the larger
+                # conditioning payload raises the activation reserve enough
+                # that the DiT then misses a FULL load by a few hundred MB.
+                # Measured: shot 1 full load at 18.5 s/it, shot 2 with 399 MB
+                # offloaded at 267 s/it - a 14x collapse for 2% of the weights,
+                # because every offloaded layer streams over PCIe every step.
+                _vfreed = 0
+                for _v in (video_vae, audio_vae):
+                    try:
+                        _vp = getattr(_v, "patcher", None)
+                        if _vp is not None and hasattr(_vp, "model"):
+                            _vp.model.to(_mm.vae_offload_device())
+                            _vfreed += 1
+                    except Exception:
+                        pass
                 try:
                     _dev = _mm.get_torch_device()
                     _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
                     _mm.soft_empty_cache()
-                    print("[H3Memory] TE evicted; %.1f GB free for the DiT"
-                          % (_mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
+                    print("[H3Memory] TE%s evicted; %.1f GB free for the DiT"
+                          % (" + %d VAE(s)" % _vfreed if _vfreed else "",
+                             _mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
                 except Exception:
                     pass
 

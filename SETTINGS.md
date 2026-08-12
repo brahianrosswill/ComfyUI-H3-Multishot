@@ -138,6 +138,19 @@ audio leveller that once sat here has been removed — it corrected the decoded
 audio while the raw-latent pin carried the drift forward untouched, which is
 the same flaw that made the picture dials fail.
 
+
+**The activation reserve never outbids the weights (2026-08-12).** Every GB the
+reserve claims comes out of the weight budget, and a DiT that misses a *full*
+load streams the remainder over PCIe on every step. Measured at 960x544: shot 1
+reserved 7.8 GB and loaded completely at 18.8 s/it; shot 2's larger conditioning
+payload asked for 9.4 GB, left the DiT 399 MB short, and ran at **283 s/it** - a
+15x collapse bought by headroom the measurement did not need. The reserve is now
+capped at `free - weights - 384 MB`, so the weights always load completely and
+the pool takes what is left. Same three-shot chain: 36m54s -> 14m03s, every shot
+`full load: True`, no OOM, and the clamped pool then measured a 7.3 GB peak
+against the 8.0 GB it was given. If a clamped run ever does OOM, lower the
+resolution or the reference count - do not raise the reserve.
+
 **Drift, and what actually works on it (corrected 2026-08-12).** Every chained
 lane drifts — texture up, luminance and audio spectrum down — because the model
 regenerates from its own output. But **per-shot correction does not fix it**: a
