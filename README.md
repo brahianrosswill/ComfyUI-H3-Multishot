@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.2.0 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.2.2 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,104 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.2.2
+
+One fix, reported by a user against 2.2.1.
+
+### Fixed: reference renders forced glasses onto the subject
+
+Reported on Civitai: a reference image produced a character wearing thick black
+frames in every shot, and prompting to remove them changed nothing.
+
+The pack injects a `retention_analysis` block alongside reference images so that
+identity and voice stop drifting across a chain. That block was hardcoded to say
+the subject *"retains the same face, skin, hair, **glasses** and wardrobe"* - so
+every ref2va render was instructed to keep glasses regardless of the prompt.
+
+It could not be argued with either, because the sampler runs on a `BasicGuider`:
+**cfg 1.0, no negative branch**. There is nothing for a negative statement to
+subtract from, so "remove the glasses" simply put the word into the conditioning
+a second time.
+
+The block now says "the same face, skin and hair" and names no accessories.
+Eyewear, hats and jewellery are wardrobe choices that belong to the prompt.
+
+**The general rule this exposes:** anything hardcoded into unconditional
+conditioning is permanent from the user's side. At cfg 1.0 a default that names
+a thing can never be prompted away. Phrase everything positively - "clear
+unobstructed eyes", never "no glasses".
+
+---
+
+## New in v2.2.1
+
+A bug-fix release. Four defects, three of them reported from real renders on
+real machines rather than found in review.
+
+### Fixed: two crashes that only appear on long or high-resolution chains
+
+Both were `DefaultCPUAllocator: not enough memory` - system RAM, not VRAM - and
+both killed the job after it had already done the expensive part.
+
+- **`master_normalize` allocated the entire finished timeline four times over.**
+  A 12-shot 1088x1920 chain tried for a single **31.2 GB** block and died on a
+  24 GB machine after 81 minutes. Worse, one of those four copies was pure
+  waste: the code rebuilt a tensor byte-for-byte identical to one already in
+  memory purely to compute two numbers for a log line, then discarded it. Every
+  statistic the function needs is one-dimensional. It now measures per shot and
+  releases each input as it is consumed, so peak memory is one finished timeline
+  plus one shot instead of four timelines. Output is **bit-identical** - verified
+  against the old implementation across every colour mode and median width, on
+  the pixels and on the log strings.
+- **The upscaler was handed every frame at once.** 243 frames at 1472x2560 is an
+  **11.0 GB** float32 allocation on top of the input. It now runs in chunks into
+  a preallocated output, so peak is one chunk rather than the whole batch.
+  Bit-identical, verified at two chunk sizes. Tune with `H3_UPSCALE_CHUNK` if you
+  want to trade memory for a little speed; default 16.
+
+If you have been unable to finish long chains, this is why.
+
+### Fixed: auto-reserve could clamp itself into a hard crash
+
+On a 12-shot 1280x736 run, shot 1 loaded completely and rendered. Shot 2 carries
+the context pin **and** the reference rows, so its activation pool requirement
+roughly doubles - the node correctly costed it at 18.2 GB. It then clamped the
+pool to 9.4 GB "so the weights still load completely", and the weights loaded
+**partially anyway**, 401 MB offloaded. Neither constraint was met and the render
+aborted inside a CUDA kernel, taking the whole ComfyUI process with it.
+
+Two causes, both fixed:
+
+- The keepout was **384 MB**, which did not cover ComfyUI's own buffer plus the
+  difference between `get_free_memory` and what it treats as usable - about
+  400 MB short. Now **1 GB**.
+- The "this is tight" warning compared the clamped reserve against a *sibling
+  shot's* measurement rather than against what this shot had just asked for. Shot
+  1's 9.1 GB made a 9.4 GB clamp look fine while the payload needed 18.2 GB, so
+  nothing was printed. It now compares against the actual request and says
+  plainly that this usually dies inside a kernel and takes the server with it,
+  and that raising the reserve cannot help because the memory is not there.
+
+**The trap worth knowing regardless of this fix: shot 1 succeeding tells you
+nothing about shot 2.** Shot 1 has no pin and no references. If shot 2 will not
+fit, lower `frames_per_shot` or the resolution, or load a smaller quantisation.
+
+### Fixed: `start_image` on the memory sampler silently did nothing
+
+Reported from the field. `start_image` on `H3MultishotMemorySampler` is an
+identity **reference row**, not a first frame - and on an fl2va checkpoint, which
+has no reference rows, it is built and then ignored entirely. Meanwhile the
+sibling node `H3MultishotSampler` has an input with the **same name** that really
+is an I2V first frame, which is where the reasonable expectation comes from. The
+combination produced no warning at all. It now prints one naming both ways to
+actually start shot 1 on a picture: use `H3MultishotSampler`, or set
+`continuity=flf_chain` here and feed `keyframe_images`.
+
+Note that `continuity=first_frame` is also not about your image - it hands over
+the *previous shot's* last frame, and does nothing on shot 1.
 
 ---
 

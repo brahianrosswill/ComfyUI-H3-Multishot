@@ -140,11 +140,14 @@ def _mn_normalize(parts, mode, med=9):
     import torch
     if mode == "off" or not parts:
         return parts, ""
-    frames = torch.cat(parts, dim=0)
-    n = frames.shape[0]
+    n = sum(int(p.shape[0]) for p in parts)
     if n < 8:
         return parts, ""
-    luma = frames.mean(dim=(1, 2, 3))
+    # Per-frame statistics only - never the whole timeline as one tensor.
+    # Concatenating it costs frames x H x W x 3 x 4 bytes, which is 31 GB for a
+    # 12-shot 1088x1920 chain, and it used to be built three times over. Every
+    # number below this point is one-dimensional.
+    luma = torch.cat([p.mean(dim=(1, 2, 3)) for p in parts])
     k = max(3, min(int(med) | 1, (n // 2) * 2 - 1)); pad = k // 2
 
     def _med(v):
@@ -165,7 +168,7 @@ def _mn_normalize(parts, mode, med=9):
         # An affine remap about each frame's own mean rescales amplitude and
         # leaves every edge where it was - not the blur the note below rules
         # out. Spatial accretion is still not fixable here.
-        sd = frames.std(dim=(1, 2, 3))
+        sd = torch.cat([p.std(dim=(1, 2, 3)) for p in parts])
         med_s = _med(sd)
         # Anchor to SHOT 1, not the timeline median. Contrast here only ever
         # ratchets up, so shot 1 is the one frame-set with nothing accreted
@@ -175,22 +178,33 @@ def _mn_normalize(parts, mode, med=9):
         # (+0.1%) and only ever pulls later shots down.
         s_target = sd[:parts[0].shape[0]].median()
         cgain = (s_target / med_s.clamp_min(1e-4)).clamp(0.70, 1.43)
-        m = luma[:, None, None, None]
-        out = ((frames - m) * cgain[:, None, None, None] + m
-               * gain[:, None, None, None]).clamp(0, 1)
     else:
-        out = (frames * gain[:, None, None, None]).clamp(0, 1)
+        cgain = None
+    # Apply per part, releasing each input as it is consumed. The caller does
+    # `parts, msg = _mn_normalize(parts, ...)` and rebinds immediately, so
+    # dropping the reference here lets each input shot be freed while the rest
+    # of the chain is still being processed. Peak becomes one finished timeline
+    # plus one shot, instead of two whole timelines.
     res, i = [], 0
-    for p in parts:
-        res.append(out[i:i + p.shape[0]]); i += p.shape[0]
-    joined = torch.cat(res, 0)
-    after = joined.mean(dim=(1, 2, 3))
+    for idx in range(len(parts)):
+        p = parts[idx]
+        j = i + int(p.shape[0])
+        g = gain[i:j, None, None, None]
+        if cgain is not None:
+            m = luma[i:j, None, None, None]
+            res.append(((p - m) * cgain[i:j, None, None, None] + m * g).clamp(0, 1))
+        else:
+            res.append((p * g).clamp(0, 1))
+        parts[idx] = None
+        del p
+        i = j
+    after = torch.cat([q.mean(dim=(1, 2, 3)) for q in res])
     msg = ("luma %.3f-%.3f -> %.3f-%.3f (target %.3f, gain %.3f-%.3f)"
            % (float(luma.min()), float(luma.max()), float(after.min()),
               float(after.max()), float(target), float(gain.min()), float(gain.max())))
     if mode == "luma+contrast":
-        a_sd = joined.std(dim=(1, 2, 3))
-        sd0 = frames.std(dim=(1, 2, 3))
+        a_sd = torch.cat([q.std(dim=(1, 2, 3)) for q in res])
+        sd0 = sd
         msg += ("; contrast %.4f-%.4f -> %.4f-%.4f"
                 % (float(sd0.min()), float(sd0.max()),
                    float(a_sd.min()), float(a_sd.max())))
@@ -337,7 +351,25 @@ def _upscale_frames(imgs, scale, model, tag):
     if model is not None:
         from comfy_extras.nodes_upscale_model import ImageUpscaleWithModel
         import comfy.model_management as _mm
-        imgs = ImageUpscaleWithModel().upscale(model, imgs)[0]
+        import os as _os
+        import torch as _t
+        # Chunked. One call with every frame allocates the whole upscaled batch
+        # in fp32 on the CPU on top of the input - 11 GB for 243 frames at
+        # 1472x2560, which is where a 12-shot 736x1280 run died after two hours.
+        # Writing into a preallocated output holds (output + one chunk) instead.
+        _n = int(imgs.shape[0])
+        _ch = max(1, int(_os.environ.get("H3_UPSCALE_CHUNK", "16")))
+        if _n > _ch:
+            _out = None
+            for _s in range(0, _n, _ch):
+                _p = ImageUpscaleWithModel().upscale(model, imgs[_s:_s + _ch])[0]
+                if _out is None:
+                    _out = _t.empty((_n,) + tuple(_p.shape[1:]), dtype=_p.dtype)
+                _out[_s:_s + int(_p.shape[0])] = _p
+                del _p
+            imgs = _out
+        else:
+            imgs = ImageUpscaleWithModel().upscale(model, imgs)[0]
         # Free it AT ONCE. Left resident it survives into the next shot, and
         # the DiT can then only load partially - measured 18.5 s/it on shot 1
         # (full load) against 349 s/it on shot 2 (431 MB offloaded), a 19x
@@ -554,7 +586,12 @@ _AUTO_FLOOR = 8 * 1024**3          # never reserve less: workspaces + margin
 _AUTO_FRACTION = 0.88              # unmeasured shapes: fraction of free VRAM
 _AUTO_WEIGHT_NUCLEUS = 2 * 1024**3  # always leave a little room for weights
 _AUTO_MARGIN = 1.25                # measured pool -> reserve headroom
-_AUTO_KEEPOUT = 384 * 1024**2      # left free beyond weights+pool (fragmentation)
+_AUTO_KEEPOUT = 1024 * 1024**2     # left free beyond weights+pool. 384 MB was
+                                   # too small: ComfyUI reserves its own ~117 MB
+                                   # buffer and counts 'usable' differently from
+                                   # get_free_memory, so a clamp computed to keep
+                                   # 20.3 GB of weights resident still offloaded
+                                   # 401 MB and then aborted in a CUDA kernel.
 _AUTO_MIN_POOL = 1536 * 1024**2    # below this, prefer a loud OOM to a silent crawl
 _auto_cache = None                 # lazy {key: pool_bytes}
 _auto_last = {"key": None, "model": None}   # what the next sampling run is
@@ -700,14 +737,30 @@ def _install_auto_reserve(patcher, model_name):
             if _cap > 0 and reserve > _cap:
                 _was = reserve
                 reserve = max(_cap, _AUTO_MIN_POOL)
-                how += (" | CLAMPED %.1f -> %.1f GB so the weights (%.1f GB) "
-                        "still load completely out of %.1f GB free"
+                how += (" | CLAMPED %.1f -> %.1f GB to keep the weights "
+                        "(%.1f GB) resident out of %.1f GB free"
                         % (_was / 2**30, reserve / 2**30, _w / 2**30,
                            _free / 2**30))
+                # Compare against what this shot ACTUALLY asked for, not against
+                # a sibling shot's measurement. Shot 2 onward carries the pin and
+                # the reference rows, so its pool requirement can be double shot
+                # 1's - and checking `measured` (shot 1's 9.1 GB) let a clamp to
+                # 9.4 GB pass silently when the payload had just been costed at
+                # 18.2 GB. The render then aborted inside a CUDA kernel, which
+                # kills the whole server and loses every completed shot.
+                if _was > reserve * 1.35:
+                    print("[H3AutoReserve] WARNING: this shot asked for %.1f GB "
+                          "of activation pool and only %.1f GB is available "
+                          "after the %.1f GB of weights. That is not a slow "
+                          "render - it usually dies inside a CUDA kernel and "
+                          "takes the server with it. Lower frames_per_shot or "
+                          "resolution, or load a smaller quantisation of the "
+                          "DiT; raising the reserve cannot help, the memory is "
+                          "not there."
+                          % (_was / 2**30, reserve / 2**30, _w / 2**30),
+                          flush=True)
                 if measured and reserve < measured:
-                    how += (" [tight: below the measured pool %.1f GB - if this"
-                            " OOMs, lower the resolution or the reference count"
-                            " rather than raising the reserve]"
+                    how += (" [tight: below the measured pool %.1f GB]"
                             % (measured / 2**30))
         except Exception:
             pass
@@ -2095,9 +2148,17 @@ def _subject_defs(n_image, n_audio, n_video, speaker="the person"):
         return ""
     d = ["subject_definitions:",
          "<Subject 1> is %s speaking in this scene." % speaker]
+    # Do NOT enumerate accessories here. This block is unconditional text on a
+    # BasicGuider path - cfg 1.0, no negative branch - so anything named is
+    # ADDED and can never be subtracted by the user's prompt. Naming "glasses"
+    # made every ref2va render force thick frames onto the subject no matter
+    # what the prompt asked for, and "remove the glasses" only put the word in
+    # the conditioning a second time (reported on Civitai 2026-08-13).
+    # Face, skin, hair and wardrobe are identity; eyewear, hats and jewellery
+    # are wardrobe choices that belong to the prompt.
     r = ["retention_analysis:",
          "<Subject 1> (appears in [Shot 1]): fully_preserved - <Subject 1> "
-         "retains the same face, skin, hair, glasses and wardrobe, and "
+         "retains the same face, skin and hair, and "
          "stays in the same room under the same lighting and colour "
          "temperature."]
     for k in range(1, n_image + 1):
@@ -2929,6 +2990,23 @@ class H3MultishotMemorySampler:
                       "rows (ref2va), but an fl2va checkpoint is loaded. "
                       "Bank slots will be ignored - use continuity="
                       "first_frame with fl2va, or load ref2va.", flush=True)
+            if start_image is not None and _is_fl:
+                # Reported from the field: start_image connected, fl2va loaded,
+                # continuity=first_frame, and shot 1 does not open on the
+                # supplied picture. Nothing was misconfigured - this input is an
+                # identity REFERENCE ROW here, and fl2va has no reference rows,
+                # so it is built and then ignored. The sibling node
+                # H3MultishotSampler has an input with the SAME NAME that really
+                # is a first frame, which is where the expectation comes from.
+                print("[H3Memory] WARNING: start_image on THIS node is an "
+                      "identity reference image, NOT a first frame - and an "
+                      "fl2va checkpoint has no reference rows, so it is "
+                      "ignored entirely. Shot 1 will NOT open on it. To start "
+                      "shot 1 on a specific picture: use the H3MultishotSampler "
+                      "node, whose start_image is a true I2V first frame, or "
+                      "set continuity=flf_chain here and feed keyframe_images "
+                      "(N+1 stills for N shots). To use it for identity "
+                      "instead, load a ref2va checkpoint.", flush=True)
 
         bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
         frames_parts, audio_parts = [], []
