@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.1.9 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.2.0 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -116,6 +116,42 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## New in v2.2.0
+
+Everything since **2.1.2**, which is where most people still are. Seven point
+releases in one: five separate defects that stopped the workflow running, a
+measured campaign against chain drift that changed the shipped defaults, and a
+whole ComfyUI version this pack could not previously run on.
+
+*(2.1.9 on GitHub and HuggingFace is this same content under a smaller number,
+tagged an hour earlier.)*
+
+**Run-blocking, all user-reported or found by finally testing what we ship:**
+
+| | |
+|---|---|
+| the Audio Spine produced static on ComfyUI 0.32.0 | fixed in 2.1.7 |
+| naming an mmproj file broke GGUF text encoders | fixed in 2.1.7 |
+| `The value 1 for reference_image_size is not available` | fixed in 2.1.6 |
+| the full workflow needed a node from a pack not in the zip | fixed in 2.1.8 |
+| **`H3_Seamless_Chain_CORE` could not be queued at all** | fixed in 2.1.9 |
+
+**New controls:** `pin_frames`, `pin_noise`, `pin_renorm`, and
+`master_normalize`'s `luma+contrast` mode.
+
+**Changed defaults that change your output:** `memory_frames` 2 → **0**, and
+`join_anchor_noise` / `handoff_release` to 0 because they are inert under
+`context_pin`.
+
+**New runtime:** ComfyUI **0.32.0**, which needed real work — its
+`ModelSamplingAV` carries the audio half of the latent on a different scale.
+0.30.0 is unchanged and still supported.
+
+Every section below is the original release note for each of those versions,
+newest first.
 
 ---
 
