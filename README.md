@@ -868,6 +868,7 @@ ComfyUI-GGUF pairs the sidecar by **filename**, scanning only the encoder's own 
 **ref2va (optional).** Only needed for the reference/bank workflows. Seamless chaining does not use it.
 
 ---
+- Curve-form GGUFs (smaller at the same quant, ComfyUI 0.30+): [HF](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF) | [Civitai](https://civitai.com/models/2835678/minimax-h3-curve-form-gguf-fl2va-ref2va-low-vram)
 
 ## How the chaining works
 
