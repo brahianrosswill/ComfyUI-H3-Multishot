@@ -190,11 +190,21 @@ def _mn_normalize(parts, mode, med=9):
         p = parts[idx]
         j = i + int(p.shape[0])
         g = gain[i:j, None, None, None]
+        # Frames may be stored fp16 to halve the host timeline. fp16's step near
+        # 1.0 is ~9.8e-4 against an 8-bit output step of 3.9e-3 - enough, but
+        # only 4x. Do the affine in fp32 and store back in the input dtype, so
+        # the memory saving costs no precision.
+        _dt = p.dtype
+        _pf = p.float() if _dt != torch.float32 else p
         if cgain is not None:
             m = luma[i:j, None, None, None]
-            res.append(((p - m) * cgain[i:j, None, None, None] + m * g).clamp(0, 1))
+            _out = ((_pf - m) * cgain[i:j, None, None, None] + m * g).clamp(0, 1)
         else:
-            res.append((p * g).clamp(0, 1))
+            _out = (_pf * g).clamp(0, 1)
+        res.append(_out.to(_dt) if _dt != torch.float32 else _out)
+        if _pf is not p:
+            del _pf
+        del _out
         parts[idx] = None
         del p
         i = j
@@ -2067,10 +2077,24 @@ class H3MultishotSampler:
                 imgs = imgs[1:]                       # duplicated seam frame
                 trim = int(round(sr / 24.0))          # matching 1/24s audio
                 wav = _smart_head_trim(wav, sr, trim)
-            frames_parts.append(imgs.cpu())
+            # fp16: the encoder quantises to uint8 downstream, and this
+            # timeline is what exhausted host RAM at 6 shots x 243f.
+            frames_parts.append(imgs.cpu().half())
             audio_parts.append(wav.cpu())
 
-        master = torch.cat(frames_parts, dim=0)
+        # Assemble in place. torch.cat allocated a second full timeline
+        # while the first was still alive - 2x peak, and a 33.8 GB contiguous
+        # request that a 64 GB box cannot satisfy. Same bytes, one buffer.
+        _n = sum(int(_p.shape[0]) for _p in frames_parts)
+        master = torch.empty((_n,) + tuple(frames_parts[0].shape[1:]),
+                             dtype=frames_parts[0].dtype)
+        _o = 0
+        for _i in range(len(frames_parts)):
+            _p = frames_parts[_i]
+            master[_o:_o + _p.shape[0]].copy_(_p)
+            _o += int(_p.shape[0])
+            frames_parts[_i] = None
+            del _p
         waveform = _xfade_audio(audio_parts, sr)
         print(f"[H3Multishot] done: {n} shots, {master.shape[0]} frames "
               f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
@@ -4218,7 +4242,9 @@ class H3MultishotMemorySampler:
                 print("[H3Memory] join %d dressed as VHS glitch" % si,
                       flush=True)
 
-            frames_parts.append(imgs.cpu())
+            # fp16: the encoder quantises to uint8 downstream, and this
+            # timeline is what exhausted host RAM at 6 shots x 243f.
+            frames_parts.append(imgs.cpu().half())
             audio_parts.append((wav if wav.ndim == 3 else wav.unsqueeze(0)).cpu())
 
         if color_level == "scene" and len(frames_parts) > 1:
@@ -4284,7 +4310,19 @@ class H3MultishotMemorySampler:
                 print("[H3Memory] master normalize (%s): %s"
                       % (master_normalize, _mn_msg), flush=True)
 
-        master = torch.cat(frames_parts, dim=0)
+        # Assemble in place. torch.cat allocated a second full timeline
+        # while the first was still alive - 2x peak, and a 33.8 GB contiguous
+        # request that a 64 GB box cannot satisfy. Same bytes, one buffer.
+        _n = sum(int(_p.shape[0]) for _p in frames_parts)
+        master = torch.empty((_n,) + tuple(frames_parts[0].shape[1:]),
+                             dtype=frames_parts[0].dtype)
+        _o = 0
+        for _i in range(len(frames_parts)):
+            _p = frames_parts[_i]
+            master[_o:_o + _p.shape[0]].copy_(_p)
+            _o += int(_p.shape[0])
+            frames_parts[_i] = None
+            del _p
         # always the short 40ms weld: a long crossfade CONSUMES its overlap,
         # which shortened audio 375ms per join and walked lip sync off from
         # shot 2 onward. The seamless_tail trim above pre-compensates 40ms.
