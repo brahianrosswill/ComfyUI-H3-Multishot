@@ -904,31 +904,40 @@ def _auto_measure_end(before, patcher=None, steps=None):
             full = int(patcher.model_size()) if patcher is not None else 0
         except Exception:
             full = 0
-        # Subtract the FULL weight size, never the resident size. When the DiT
-        # loads partially, loaded_size() falls by exactly the offloaded bytes,
-        # so (peak - loaded) overstates the pool by that same amount - and the
-        # overstatement raises the next reserve, which starves the weights
-        # further, which overstates more. Measured on a 3090 chain: shot 2
-        # recorded 8.0 GB against a true 5.3 (2749 MB offloaded), shot 3
-        # recorded 8.9 against a true 4.3 (4784 MB offloaded), and by shot 4
-        # the estimate had run away to 19.9 GB, been clamped to 3.5, and
-        # spilled to 262 s/step.
-        offloaded = max(0, full - loaded)
-        pool = peak - before["res"] - (full or loaded)
-        if offloaded > 256 * 1024**2:
-            # A shot that streamed weights every step did not measure an
-            # activation pool, it measured a spill. Caching that feeds the same
-            # ratchet from the other end, so keep the last good number.
-            print(f"[H3AutoReserve] measurement discarded: "
-                  f"{offloaded/2**30:.1f} GB of weights were offloaded this "
-                  f"shot, so its peak does not describe a resident run. The "
-                  f"cached reserve is left unchanged.", flush=True)
+        # `peak` is max_memory_reserved() - VRAM. Weights that were offloaded
+        # to the host were never in VRAM and so were never in peak. Subtract
+        # the RESIDENT bytes, not the full model size.
+        #
+        # Whether the sample is usable depends on residency, in three cases:
+        #
+        #   fully offloaded  peak IS the pool, nothing to subtract. This is the
+        #                    cleanest sample available - record it. On a 24 GB
+        #                    card at production shapes this is the NORMAL mode,
+        #                    not a fault, so discarding it stops all learning.
+        #   partial          peak is bounded by what fit on the card rather than
+        #                    by what the shot wanted. Measures the ceiling, not
+        #                    the need. Discard.
+        #   fully resident   subtract the weights and record, as always.
+        #
+        # An earlier version of this collapsed the first two cases and discarded
+        # both, which wiped the cache and then left every shot reporting "first
+        # run at this shape" - 1.5 GB reserves, 24.3 GB of driver spill and ~2x
+        # step time on the 3090. Diagnosed there with before/after logs.
+        pool = peak - before["res"] - loaded
+        _frac = (loaded / float(full)) if full else 1.0
+        _partial = bool(full) and 0.02 < _frac < 0.98
+        if _partial:
+            print(f"[H3AutoReserve] measurement discarded: only "
+                  f"{loaded/2**30:.1f} of {full/2**30:.1f} GB of weights were "
+                  f"resident, so this peak reflects what fit on the card rather "
+                  f"than what the shot needed. Cached reserve unchanged.",
+                  flush=True)
         elif pool > 512 * 1024**2:          # ignore no-op runs
             _auto_cache_store(key, pool)
             _auto_session.pop(key, None)     # re-pin from measured
             print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB for "
-                  f"this shape+payload (peak {peak/2**30:.1f} - weights "
-                  f"{(full or loaded)/2**30:.1f}) - next run reserves "
+                  f"this shape+payload (peak {peak/2**30:.1f} - resident "
+                  f"weights {loaded/2**30:.1f}) - next run reserves "
                   f"{max(pool*_AUTO_MARGIN, 2*1024**3)/2**30:.1f} GB",
                   flush=True)
     except Exception:
