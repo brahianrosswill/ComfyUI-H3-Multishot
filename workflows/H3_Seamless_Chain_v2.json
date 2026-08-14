@@ -1,8 +1,8 @@
 {
   "id": "h3-seamless-chain-v1",
   "revision": 0,
-  "last_node_id": 60,
-  "last_link_id": 84,
+  "last_node_id": 55,
+  "last_link_id": 75,
   "nodes": [
     {
       "id": 22,
@@ -1227,7 +1227,7 @@
           "name": "image",
           "shape": 7,
           "type": "IMAGE",
-          "link": 84
+          "link": 74
         }
       ],
       "outputs": [
@@ -1282,7 +1282,7 @@
           "name": "IMAGE",
           "type": "IMAGE",
           "links": [
-            82
+            74
           ]
         }
       ],
@@ -2364,252 +2364,6 @@
         false
       ],
       "color": "#322"
-    },
-    {
-      "id": 56,
-      "type": "H3AutoRefs",
-      "pos": [
-        -3121.3755431422505,
-        1342.1188164370967
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "title": "AUTO REFS - scans the script for character folders under refs_root",
-      "inputs": [
-        {
-          "name": "prompt_text",
-          "type": "STRING",
-          "link": 76
-        }
-      ],
-      "outputs": [
-        {
-          "name": "ref_1",
-          "type": "IMAGE",
-          "links": [
-            77
-          ],
-          "slot_index": null
-        },
-        {
-          "name": "ref_2",
-          "type": "IMAGE",
-          "links": [
-            78
-          ],
-          "slot_index": null
-        },
-        {
-          "name": "ref_3",
-          "type": "IMAGE",
-          "links": [
-            80
-          ],
-          "slot_index": null
-        },
-        {
-          "name": "ref_4",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "ref_5",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "ref_6",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "ref_7",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "ref_8",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "ref_9",
-          "type": "IMAGE",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "prompt_out",
-          "type": "STRING",
-          "links": null,
-          "slot_index": null
-        },
-        {
-          "name": "report",
-          "type": "STRING",
-          "links": null,
-          "slot_index": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "H3AutoRefs"
-      },
-      "widgets_values": [
-        3,
-        "",
-        "",
-        "",
-        "no_reference"
-      ]
-    },
-    {
-      "id": 57,
-      "type": "ImageBatch",
-      "pos": [
-        -2781.3755431422505,
-        1332.1188164370967
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image1",
-          "type": "IMAGE",
-          "link": 77
-        },
-        {
-          "name": "image2",
-          "type": "IMAGE",
-          "link": 78
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            79
-          ],
-          "slot_index": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ImageBatch"
-      }
-    },
-    {
-      "id": 58,
-      "type": "ImageBatch",
-      "pos": [
-        -2641.3755431422505,
-        1412.1188164370967
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "inputs": [
-        {
-          "name": "image1",
-          "type": "IMAGE",
-          "link": 79
-        },
-        {
-          "name": "image2",
-          "type": "IMAGE",
-          "link": 80
-        }
-      ],
-      "outputs": [
-        {
-          "name": "IMAGE",
-          "type": "IMAGE",
-          "links": [
-            81
-          ],
-          "slot_index": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "ImageBatch"
-      }
-    },
-    {
-      "id": 60,
-      "type": "PrimitiveBoolean",
-      "pos": [
-        -2781.3755431422505,
-        1512.1188164370967
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "title": "USE AUTO REFS (off = the two manual LoadImage slots)",
-      "inputs": [],
-      "outputs": [
-        {
-          "name": "BOOLEAN",
-          "type": "BOOLEAN",
-          "links": [
-            83
-          ],
-          "slot_index": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "PrimitiveBoolean"
-      },
-      "widgets_values": [
-        false
-      ]
-    },
-    {
-      "id": 59,
-      "type": "H3AnySwitch",
-      "pos": [
-        -2461.3755431422505,
-        1242.1188164370967
-      ],
-      "flags": {},
-      "order": 0,
-      "mode": 0,
-      "title": "manual refs / auto refs",
-      "inputs": [
-        {
-          "name": "use_on",
-          "type": "BOOLEAN",
-          "link": 83
-        },
-        {
-          "name": "off_path",
-          "type": "*",
-          "link": 82
-        },
-        {
-          "name": "on_path",
-          "type": "*",
-          "link": 81
-        }
-      ],
-      "outputs": [
-        {
-          "name": "value",
-          "type": "*",
-          "links": [
-            84
-          ],
-          "slot_index": null
-        }
-      ],
-      "properties": {
-        "Node name for S&R": "H3AnySwitch"
-      }
     }
   ],
   "links": [
@@ -3030,83 +2784,19 @@
       "IMAGE"
     ],
     [
+      74,
+      51,
+      0,
+      52,
+      0,
+      "IMAGE"
+    ],
+    [
       75,
       52,
       0,
       30,
       7,
-      "IMAGE"
-    ],
-    [
-      76,
-      6,
-      0,
-      56,
-      0,
-      "STRING"
-    ],
-    [
-      77,
-      56,
-      0,
-      57,
-      0,
-      "IMAGE"
-    ],
-    [
-      78,
-      56,
-      1,
-      57,
-      1,
-      "IMAGE"
-    ],
-    [
-      79,
-      57,
-      0,
-      58,
-      0,
-      "IMAGE"
-    ],
-    [
-      80,
-      56,
-      2,
-      58,
-      1,
-      "IMAGE"
-    ],
-    [
-      81,
-      58,
-      0,
-      59,
-      2,
-      "IMAGE"
-    ],
-    [
-      82,
-      51,
-      0,
-      59,
-      1,
-      "IMAGE"
-    ],
-    [
-      83,
-      60,
-      0,
-      59,
-      0,
-      "BOOLEAN"
-    ],
-    [
-      84,
-      59,
-      0,
-      52,
-      0,
       "IMAGE"
     ]
   ],
