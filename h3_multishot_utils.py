@@ -821,12 +821,20 @@ def _install_auto_reserve(patcher, model_name):
                     # resident 0.0, 24.3 GB driver spill, ~2x step time). So
                     # give the pool its need, bounded by the card, and let the
                     # weights stream: that is the cheaper side here.
-                    reserve = min(_was, _card_max)
-                    how += (" | NEED %.1f -> %.1f GB: pool need %.1f GB "
-                            "exceeds the %.1f GB left beside the weights, so "
-                            "the weights stream this shot"
-                            % (_was / 2**30, reserve / 2**30,
-                               _known_need / 2**30, max(_cap, 0) / 2**30))
+                    # Bare need, not need*margin. The x1.25 margin guards a
+                    # pool overrun against PINNED weights; here the weights
+                    # stream regardless, so an overrun just evicts a little
+                    # more of them - graceful. Every GB of margin trimmed is a
+                    # GB of weights that stays resident instead of streaming
+                    # every step (measured: 18.4 reserve left 3.3 GB resident,
+                    # 14.7 leaves 7.0).
+                    reserve = min(max(int(_known_need), _AUTO_MIN_POOL),
+                                  _card_max)
+                    _resid = max(0, int(_free - _AUTO_KEEPOUT) - reserve)
+                    how += (" | NEED %.1f -> %.1f GB (bare need, margin "
+                            "yielded to weights): ~%.1f GB of weights can stay "
+                            "resident"
+                            % (_was / 2**30, reserve / 2**30, _resid / 2**30))
                     print("[H3AutoReserve] pool need %.1f GB cannot fit "
                           "beside %.1f GB of weights in %.1f GB free. "
                           "Reserving %.1f GB for the pool and letting the "
