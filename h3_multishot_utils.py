@@ -609,6 +609,9 @@ def _auto_cache_path():
     return os.path.join(base, "h3_auto_reserve.json")
 
 
+_AUTO_SCHEMA = 2  # bumped when the pool measurement changed meaning
+
+
 def _auto_cache_load():
     global _auto_cache
     if _auto_cache is None:
@@ -620,6 +623,19 @@ def _auto_cache_load():
                 _auto_cache = json.load(_io.open(p, encoding="utf-8"))
             except Exception:
                 _auto_cache = {}
+        # Entries written before the full-weights fix can be too large by
+        # however much the DiT had been offloaded that shot, and the store
+        # keeps the largest value forever - so one bad shot poisons a shape
+        # permanently. Drop pre-schema caches once instead of carrying them.
+        if _auto_cache.pop("_schema", None) != _AUTO_SCHEMA:
+            _stale = len(_auto_cache)
+            if _stale:
+                print("[H3AutoReserve] discarded %d cached reserve(s) written "
+                      "before the partial-load measurement fix. Those numbers "
+                      "could be inflated by the offloaded weight bytes and "
+                      "never shrank. They re-measure on the next run."
+                      % _stale, flush=True)
+            _auto_cache = {}
     return _auto_cache
 
 
@@ -633,8 +649,10 @@ def _auto_cache_store(key, pool_bytes):
     cache[key] = int(pool_bytes)
     try:
         import io as _io
+        _out = dict(cache)
+        _out["_schema"] = _AUTO_SCHEMA
         _io.open(_auto_cache_path(), "w", encoding="utf-8").write(
-            json.dumps(cache, indent=1))
+            json.dumps(_out, indent=1))
     except Exception as e:
         print(f"[H3AutoReserve] cache write failed ({e}) - measurements "
               f"will not persist across restarts", flush=True)
@@ -734,7 +752,45 @@ def _install_auto_reserve(patcher, model_name):
             _free = _cm.get_free_memory(_dev)
             _w = int(patcher.model_size())
             _cap = int(_free - _w - _AUTO_KEEPOUT)
-            if _cap > 0 and reserve > _cap:
+            if _cap <= 0:
+                # The weights alone exceed free VRAM. Reserving the measured
+                # pool here is the WORST possible move: every byte of reserve
+                # pushes another byte of weights out, and the old `_cap > 0`
+                # guard skipped the clamp entirely in exactly this case. A
+                # 3090 with 10.3 GB free and 20.3 GB of weights reserved
+                # 22.1 GB and loaded "0.00 MB usable, 0.00 MB loaded,
+                # 20796.43 MB offloaded" - every layer streamed off disk on
+                # every step, 128 s/it against ~29 s/it resident, and after
+                # four hours the file-reader gave out with
+                # hostbuf_file_reader_read failed.
+                _was = reserve
+                # NOT the floor. Reserving the minimum guarantees the weights
+                # load but starves the activation pool, and the allocator then
+                # spills ACTIVATIONS instead - measured worse than the problem
+                # it replaced: 36 -> 55 -> 331 s/it across three shots while
+                # every shot still reported 'loaded completely, full load:
+                # True'. Use the measured pool when a sibling shot has given
+                # us one: shot 2 measured 8.1 GB and peaked at 22.6 with 14.5
+                # GB of weights, which fits a 24 GB card exactly. The inflated
+                # payload estimate (x1.6 x1.25 compounding off an already
+                # bumped sibling) is what asks for 16 GB and does not fit.
+                reserve = (max(int(measured), _AUTO_MIN_POOL)
+                           if measured else _AUTO_MIN_POOL)
+                how += (" | TIGHT %.1f -> %.1f GB: weights %.1f GB vs "
+                        "%.1f GB reported free"
+                        % (_was / 2**30, reserve / 2**30, _w / 2**30,
+                           _free / 2**30))
+                print("[H3AutoReserve] TIGHT: %.1f GB of weights against "
+                      "%.1f GB reported free, so this shot has no headroom. "
+                      "Reserving %.1f GB (the measured pool) rather than the "
+                      "payload estimate, which does not fit. Note the reported "
+                      "figure understates what ComfyUI ends up with, so the "
+                      "weights may still load completely - watch for a spill "
+                      "instead: high GPU utilisation at low wattage. If the "
+                      "render crawls, lower frames_per_shot or resolution, free "
+                      "the other ComfyUI instance, or load a smaller DiT."
+                      % (_w / 2**30, _free / 2**30, reserve / 2**30), flush=True)
+            elif reserve > _cap:
                 _was = reserve
                 reserve = max(_cap, _AUTO_MIN_POOL)
                 how += (" | CLAMPED %.1f -> %.1f GB to keep the weights "
@@ -833,13 +889,36 @@ def _auto_measure_end(before, patcher=None, steps=None):
                                      "model_loaded_weight_memory", 0))
             except Exception:
                 loaded = 0
-        pool = peak - before["res"] - loaded
-        if pool > 512 * 1024**2:            # ignore no-op runs
+        full = 0
+        try:
+            full = int(patcher.model_size()) if patcher is not None else 0
+        except Exception:
+            full = 0
+        # Subtract the FULL weight size, never the resident size. When the DiT
+        # loads partially, loaded_size() falls by exactly the offloaded bytes,
+        # so (peak - loaded) overstates the pool by that same amount - and the
+        # overstatement raises the next reserve, which starves the weights
+        # further, which overstates more. Measured on a 3090 chain: shot 2
+        # recorded 8.0 GB against a true 5.3 (2749 MB offloaded), shot 3
+        # recorded 8.9 against a true 4.3 (4784 MB offloaded), and by shot 4
+        # the estimate had run away to 19.9 GB, been clamped to 3.5, and
+        # spilled to 262 s/step.
+        offloaded = max(0, full - loaded)
+        pool = peak - before["res"] - (full or loaded)
+        if offloaded > 256 * 1024**2:
+            # A shot that streamed weights every step did not measure an
+            # activation pool, it measured a spill. Caching that feeds the same
+            # ratchet from the other end, so keep the last good number.
+            print(f"[H3AutoReserve] measurement discarded: "
+                  f"{offloaded/2**30:.1f} GB of weights were offloaded this "
+                  f"shot, so its peak does not describe a resident run. The "
+                  f"cached reserve is left unchanged.", flush=True)
+        elif pool > 512 * 1024**2:          # ignore no-op runs
             _auto_cache_store(key, pool)
             _auto_session.pop(key, None)     # re-pin from measured
             print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB for "
                   f"this shape+payload (peak {peak/2**30:.1f} - weights "
-                  f"{loaded/2**30:.1f}) - next run reserves "
+                  f"{(full or loaded)/2**30:.1f}) - next run reserves "
                   f"{max(pool*_AUTO_MARGIN, 2*1024**3)/2**30:.1f} GB",
                   flush=True)
     except Exception:
@@ -3315,6 +3394,27 @@ class H3MultishotMemorySampler:
                      " + identity ref" if (start_image is not None
                                            and anchor_frames > 0) else ""),
                   flush=True)
+
+            # Symmetric eviction: free the DiT before the encoder loads.
+            # Without this the previous shot's DiT is still resident when a
+            # 15.69 GB encoder is requested, and on a 24 GB card it cannot fit
+            # beside it - ComfyUI streams the encoder off disk and the reader
+            # eventually fails (hostbuf_file_reader_read). Costs nothing: the
+            # DiT is reloaded every shot regardless.
+            if si > 0:
+                try:
+                    import comfy.model_management as _mm2
+                    _d2 = _mm2.get_torch_device()
+                    _b4 = _mm2.get_free_memory(_d2) / (1024 ** 3)
+                    _mm2.free_memory(_mm2.get_total_memory(_d2) * 0.9, _d2)
+                    _mm2.soft_empty_cache()
+                    _af = _mm2.get_free_memory(_d2) / (1024 ** 3)
+                    print("[H3Memory] DiT evicted before the text encoder; "
+                          "%.1f -> %.1f GB free" % (_b4, _af), flush=True)
+                except Exception as _e:
+                    print("[H3Memory] could not evict before the encoder (%s) - "
+                          "if the encoder streams from disk this is why" % _e,
+                          flush=True)
 
             if kf_vision:
                 tokens = clip.tokenize(prompt, images=kf_vision)

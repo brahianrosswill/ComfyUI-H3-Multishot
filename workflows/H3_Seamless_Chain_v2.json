@@ -2251,14 +2251,14 @@
           "links": []
         }
       ],
-      "title": "VRAM / SPEED SWITCHES (all OFF = verified)",
+      "title": "FEATURE SWITCHES - sol_attn / chunk_ffn / block_cache need their nodes UN-BYPASSED (select + Ctrl+B) and their third-party packs installed. The switch only routes; it cannot enable a bypassed node.",
       "properties": {
         "Node name for S&R": "H3StudioSwitches"
       },
       "widgets_values": [
         false,
-        true,
-        true,
+        false,
+        false,
         false,
         false,
         false,
