@@ -716,6 +716,7 @@ def _install_auto_reserve(patcher, model_name):
             return pinned
         cache = _auto_cache_load()
         measured = cache.get(key) or 0
+        _known_need = int(measured)   # best evidence of true pool need
         if measured:
             # a real measurement carries its own x1.25 margin - the old
             # 8 GB floor here overrode good small measurements and forced
@@ -733,6 +734,7 @@ def _install_auto_reserve(patcher, model_name):
                 if k2.startswith(prefix) and v2:
                     sib = max(sib or 0, v2)
             if sib:
+                _known_need = int(sib * 1.6)
                 reserve = max(int(sib * 1.6 * _AUTO_MARGIN), _AUTO_FLOOR)
                 how = (f"payload variant of a measured shape: sibling pool "
                        f"{sib/2**30:.1f} GB x 1.6 x {_AUTO_MARGIN}")
@@ -755,7 +757,12 @@ def _install_auto_reserve(patcher, model_name):
         # at 283 s/it - a 15x collapse bought by 1.6 GB of headroom the
         # measurement said was not needed. The failure modes are asymmetric:
         # too small OOMs loudly and you fix it, too large silently costs 15x.
-        # So the pool yields to the weights, never the other way round.
+        # So the pool yields to the weights - but ONLY while the cut stays at
+        # or above the measured need. Cutting below it does not keep the
+        # weights resident (the allocator evicts them for real allocations
+        # regardless - measured on a 3090: clamped to 1.5 GB "to keep weights
+        # resident" and the shot's own measurement then read resident 0.0),
+        # so past that line the weights yield instead.
         try:
             import comfy.model_management as _cm
             _dev = _cm.get_torch_device()
@@ -786,6 +793,8 @@ def _install_auto_reserve(patcher, model_name):
                 # bumped sibling) is what asks for 16 GB and does not fit.
                 reserve = (max(int(measured), _AUTO_MIN_POOL)
                            if measured else _AUTO_MIN_POOL)
+                reserve = max(min(reserve, int(_free - _AUTO_KEEPOUT)),
+                              _AUTO_MIN_POOL)
                 how += (" | TIGHT %.1f -> %.1f GB: weights %.1f GB vs "
                         "%.1f GB reported free"
                         % (_was / 2**30, reserve / 2**30, _w / 2**30,
@@ -802,29 +811,56 @@ def _install_auto_reserve(patcher, model_name):
                       % (_w / 2**30, _free / 2**30, reserve / 2**30), flush=True)
             elif reserve > _cap:
                 _was = reserve
-                reserve = max(_cap, _AUTO_MIN_POOL)
-                how += (" | CLAMPED %.1f -> %.1f GB to keep the weights "
-                        "(%.1f GB) resident out of %.1f GB free"
-                        % (_was / 2**30, reserve / 2**30, _w / 2**30,
-                           _free / 2**30))
-                # Compare against what this shot ACTUALLY asked for, not against
-                # a sibling shot's measurement. Shot 2 onward carries the pin and
-                # the reference rows, so its pool requirement can be double shot
-                # 1's - and checking `measured` (shot 1's 9.1 GB) let a clamp to
-                # 9.4 GB pass silently when the payload had just been costed at
-                # 18.2 GB. The render then aborted inside a CUDA kernel, which
-                # kills the whole server and loses every completed shot.
-                if _was > reserve * 1.35:
-                    print("[H3AutoReserve] WARNING: this shot asked for %.1f GB "
-                          "of activation pool and only %.1f GB is available "
-                          "after the %.1f GB of weights. That is not a slow "
-                          "render - it usually dies inside a CUDA kernel and "
-                          "takes the server with it. Lower frames_per_shot or "
-                          "resolution, or load a smaller quantisation of the "
-                          "DiT; raising the reserve cannot help, the memory is "
-                          "not there."
-                          % (_was / 2**30, reserve / 2**30, _w / 2**30),
-                          flush=True)
+                _card_max = max(int(_free - _AUTO_KEEPOUT), _AUTO_MIN_POOL)
+                if _known_need and _cap < _known_need:
+                    # The cut would land below the measured need. Weight
+                    # residency is not achievable in this regime - the
+                    # allocator evicts weights to satisfy the sampler's real
+                    # allocations no matter what is reserved (3090: clamped to
+                    # 1.5 GB "to keep weights resident", measurement then read
+                    # resident 0.0, 24.3 GB driver spill, ~2x step time). So
+                    # give the pool its need, bounded by the card, and let the
+                    # weights stream: that is the cheaper side here.
+                    reserve = min(_was, _card_max)
+                    how += (" | NEED %.1f -> %.1f GB: pool need %.1f GB "
+                            "exceeds the %.1f GB left beside the weights, so "
+                            "the weights stream this shot"
+                            % (_was / 2**30, reserve / 2**30,
+                               _known_need / 2**30, max(_cap, 0) / 2**30))
+                    print("[H3AutoReserve] pool need %.1f GB cannot fit "
+                          "beside %.1f GB of weights in %.1f GB free. "
+                          "Reserving %.1f GB for the pool and letting the "
+                          "weights stream - clamping the pool here does not "
+                          "keep the weights resident, it only adds a driver "
+                          "spill on top of the offload."
+                          % (_known_need / 2**30, _w / 2**30,
+                             _free / 2**30, reserve / 2**30), flush=True)
+                    if _card_max < _known_need:
+                        print("[H3AutoReserve] WARNING: even with zero weights "
+                              "resident the card has %.1f GB for a %.1f GB "
+                              "pool. This can die inside a CUDA kernel. Lower "
+                              "frames_per_shot or resolution."
+                              % (_card_max / 2**30, _known_need / 2**30),
+                              flush=True)
+                else:
+                    # No measurement says the cut goes below need, so this is
+                    # margin-trimming: keep the weights resident. Measured
+                    # 2026-08-12: a 399 MB weight shortfall cost 15x.
+                    reserve = max(_cap, _AUTO_MIN_POOL)
+                    how += (" | CLAMPED %.1f -> %.1f GB to keep the weights "
+                            "(%.1f GB) resident out of %.1f GB free"
+                            % (_was / 2**30, reserve / 2**30, _w / 2**30,
+                               _free / 2**30))
+                    if _was > reserve * 1.35:
+                        print("[H3AutoReserve] WARNING: this shot asked for "
+                              "%.1f GB of activation pool and only %.1f GB is "
+                              "available after the %.1f GB of weights. That "
+                              "is not a slow render - it usually dies inside "
+                              "a CUDA kernel and takes the server with it. "
+                              "Lower frames_per_shot or resolution, or load a "
+                              "smaller quantisation of the DiT."
+                              % (_was / 2**30, reserve / 2**30, _w / 2**30),
+                              flush=True)
                 if measured and reserve < measured:
                     how += (" [tight: below the measured pool %.1f GB]"
                             % (measured / 2**30))
