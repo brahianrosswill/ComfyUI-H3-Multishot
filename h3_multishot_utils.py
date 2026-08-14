@@ -3712,17 +3712,61 @@ class H3MultishotMemorySampler:
                 # because every offloaded layer streams over PCIe every step.
                 _vfreed = 0
                 for _v in (video_vae, audio_vae):
-                    try:
-                        _vp = getattr(_v, "patcher", None)
-                        if _vp is not None and hasattr(_vp, "model"):
-                            _vp.model.to(_mm.vae_offload_device())
-                            _vfreed += 1
-                    except Exception:
-                        pass
+                    if getattr(_v, "patcher", None) is not None:
+                        _vfreed += 1
                 try:
                     _dev = _mm.get_torch_device()
+                    # Unload through model management, NOT module.to(). On the
+                    # DynamicVRAM path (0.33+) weights live in a comfy_aimdo
+                    # vbar arena; a bare .to(cpu) moves the module and leaves
+                    # the arena's pages resident (~8 GB observed on a 24 GB
+                    # card), after which free_memory reports "0 models
+                    # unloaded" because nothing LOOKS loaded any more. Proper
+                    # unload goes through the patcher and tears the arena down.
+                    # The DiT is not loaded yet, and TE/VAEs are re-requested
+                    # every shot anyway, so this costs nothing extra.
+                    try:
+                        _mm.unload_all_models()
+                    except Exception as _ue:
+                        print("[H3Memory] unload_all_models failed (%s) - "
+                              "falling back to module moves" % _ue, flush=True)
+                        try:
+                            clip.patcher.model.to(_mm.text_encoder_offload_device())
+                        except Exception:
+                            pass
+                        for _v in (video_vae, audio_vae):
+                            try:
+                                _v.patcher.model.to(_mm.vae_offload_device())
+                            except Exception:
+                                pass
                     _mm.free_memory(_mm.get_total_memory(_dev) * 0.9, _dev)
                     _mm.soft_empty_cache()
+                    # Name whoever is still holding the card. This is the
+                    # instrument that settles the "mystery 8 GB": if the vbar
+                    # theory is right this prints nothing on 0.33.1 any more;
+                    # if it is wrong, the culprit is named instead of guessed.
+                    try:
+                        import torch as _t
+                        _freeb, _totb = _t.cuda.mem_get_info(_dev.index
+                                        if hasattr(_dev, "index") else 0)
+                        if (_totb - _freeb) > _totb * 0.25:
+                            print("[H3Memory] post-evict residents: driver "
+                                  "%.1f GB held | torch alloc %.1f reserved %.1f"
+                                  % ((_totb - _freeb) / 2**30,
+                                     _t.cuda.memory_allocated(_dev) / 2**30,
+                                     _t.cuda.memory_reserved(_dev) / 2**30),
+                                  flush=True)
+                            for _lm in list(getattr(_mm, "current_loaded_models", [])):
+                                try:
+                                    _sz = _lm.model.loaded_size()
+                                    if _sz > 256 * 1024**2:
+                                        print("[H3Memory]   resident: %s  %.2f GB"
+                                              % (_lm.model.model.__class__.__name__,
+                                                 _sz / 2**30), flush=True)
+                                except Exception:
+                                    pass
+                    except Exception:
+                        pass
                     print("[H3Memory] TE%s evicted; %.1f GB free for the DiT"
                           % (" + %d VAE(s)" % _vfreed if _vfreed else "",
                              _mm.get_free_memory(_dev) / (1024 ** 3)), flush=True)
