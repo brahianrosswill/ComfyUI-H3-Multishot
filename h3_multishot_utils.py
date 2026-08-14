@@ -791,8 +791,8 @@ def _install_auto_reserve(patcher, model_name):
                 # GB of weights, which fits a 24 GB card exactly. The inflated
                 # payload estimate (x1.6 x1.25 compounding off an already
                 # bumped sibling) is what asks for 16 GB and does not fit.
-                reserve = (max(int(measured), _AUTO_MIN_POOL)
-                           if measured else _AUTO_MIN_POOL)
+                reserve = (max(int(_known_need), _AUTO_MIN_POOL)
+                           if _known_need else _AUTO_MIN_POOL)
                 reserve = max(min(reserve, int(_free - _AUTO_KEEPOUT)),
                               _AUTO_MIN_POOL)
                 how += (" | TIGHT %.1f -> %.1f GB: weights %.1f GB vs "
