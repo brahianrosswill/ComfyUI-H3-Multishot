@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.2.2 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.2.5 - MiniMax-H3 Seamless Chain**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -62,7 +62,9 @@ cd ComfyUI/custom_nodes
 git clone https://github.com/jlucasmcrell/ComfyUI-H3-Multishot
 ```
 
-Or in ComfyUI-Manager: *Install via Git URL*. Requires **ComfyUI v0.30.0+** (native MiniMax-H3 support).
+Or search **H3 Multishot** in ComfyUI-Manager - the pack is on the Comfy
+Registry as `comfyui-h3-multishot`. *Install via Git URL* also works.
+Requires **ComfyUI v0.30.0+** (native MiniMax-H3 support).
 
 **2. Put the models in place**
 
