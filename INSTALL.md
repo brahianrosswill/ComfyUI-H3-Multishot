@@ -52,15 +52,56 @@ Both H3 variants chain. They differ in what else they can carry:
   mechanism behind voice anchoring (`voice_ref` / `self_anchor_voice`) and
   the identity bank. Reference tokens ride through every sampling step, so
   it is somewhat slower and wants a little more headroom.
-- **`fl2va`** — the first/last-frame variant. Lighter and faster, no
+- **`fl2va`** — the first/last-frame variant. Fewer tokens per step, no
   reference rows, so voice anchoring and the bank do nothing on it. Chains
   perfectly well; the voice is carried by the frame relay and the join's
   audio reference instead of being explicitly pinned.
 
+Both files are **exactly the same size** at every quant level - fl2va and ref2va
+are byte-identical in bytes, so there is no VRAM or disk saving in choosing one.
+"Lighter" means fewer tokens per sampling step, because there are no reference
+rows riding along; it has never meant a smaller file.
+
+What you actually trade:
+
+* **`ref2va`** carries reference rows - voice anchoring, the identity bank, and
+  reference images. It holds a supplied keyframe only *softly*.
+* **`fl2va`** has no reference rows at all, but it **lands on a supplied frame**.
+  Measured against the same frame: **26.35 dB on fl2va versus 16.15 dB
+  (turbo, 6 steps) and 16.81 dB (stock, 20 steps) on ref2va + keyframe.** The
+  stock control rules out the sampler - the checkpoints genuinely differ. fl2va
+  can also take a first *and* last frame and plan a camera move between them,
+  which ref2va cannot do at all.
+
+Rule of thumb: **ref2va when identity or voice must persist, fl2va when a shot
+must start exactly where the last one ended.**
+
 Blind review passed on the `fl2va` configuration. `ref2va` ships as the
 default because it makes voice identity explicit rather than emergent — set
 the checkpoint to `fl2va` and turn `self_anchor_voice` off if you prefer the
-lighter, reviewed path.
+reviewed path.
+
+
+### Prompt files and `comfyui-inspire-pack`
+
+`RiftPromptSource` finds `.txt` prompt files through the `inspire_prompts`
+folder path, which is registered by **comfyui-inspire-pack**. If that pack is
+not installed the dropdown is empty however many prompt files you have, because
+the path is never registered. Three ways to satisfy it:
+
+* install **comfyui-inspire-pack** and put prompts in its `prompts/` folder, or
+* register the path yourself in `extra_model_paths.yaml` and restart:
+
+```yaml
+my_prompts:
+    base_path: D:/path/to/your/prompts/
+    inspire_prompts: .
+```
+
+* or ignore the dropdown entirely and set `manual_path` to a file.
+
+As of 2.2.4 the node says which of these applies instead of just coming back
+empty.
 
 ## 3. Load a workflow
 
@@ -223,3 +264,11 @@ A correct first run prints something like this to the console:
 
 The progress bar sitting at `0/N` for a while at the start is the first pass
 over the shot — not a hang.
+
+### Automatic reference casting
+
+If you keep character reference photos, `H3AutoRefs` can cast them from your
+script - one subfolder per character under a `refs_root` (default
+`input/h3_refs/`), matched against names in the prose. Full behaviour and every
+widget is in `SETTINGS.md` under "Automatic reference casting". Optional; the
+manual `LoadImage` reference slots work exactly as before.

@@ -86,6 +86,35 @@ changing mid-scene.
 
 ---
 
+
+### 6. Change something physical in every shot
+
+Rule 5 is about **appearance and the room** - a character's description and the
+lighting, restated identically. It is *not* an instruction to restate the
+action, and reading it that way is the most common cause of a chain that stops
+progressing: shot 3 comes back as a near-copy of shot 2.
+
+The reason is that the model is separately instructed to preserve the subject,
+the room and the colour temperature. When shot 3's text is nearly identical to
+shot 2's, "keep everything the same" is the only clear signal in the prompt, and
+that is what you get.
+
+So each shot's action has to leave the world in a state the previous shot's
+world was **not** in. Physical and irreversible, not a mood or a camera move:
+
+* weak - *"Marcus looks at the clipboard and frowns."* Could be any shot.
+* strong - *"Marcus tears the top sheet off, crumples it and drops it; the bare
+  second page is now uppermost."* Shot 4 cannot be mistaken for this one.
+
+The test: if you can swap two shots' action lines and the script still reads
+correctly, the model cannot tell them apart either.
+
+Two things actively work against you here, both because CFG is 1.0 and there is
+no negative branch to subtract anything: **negations get rendered** ("the shot
+does not repeat" puts *repeat* in the conditioning), and **stillness phrases
+freeze the whole frame** ("goes still", "does not move"). Say what changes, not
+what does not.
+
 ## How identity holds with no reference images
 
 Two mechanisms, stacked, and neither works alone:

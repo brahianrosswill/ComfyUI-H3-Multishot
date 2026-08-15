@@ -8,9 +8,10 @@ theoretical best. Three of them are deliberately non-default:
 `audio_lock` off, `join_anchor_noise` 0.002 and `join_blend` on.
 
 Shipped defaults favour explicit identity: `ref2va` with voice self-anchoring
-and the bank on. The configuration that went through blind review was the
-lighter one - `fl2va`, no reference rows - and switching to it is two
-changes (see *Checkpoint choice*). Both chain seamlessly.
+and the bank on. The configuration that went through blind review was `fl2va`,
+which carries no reference rows, and switching to it is two changes (see
+*Checkpoint choice*). Both chain seamlessly, and both files are the same size -
+the difference is reference rows, not weight.
 
 ---
 
@@ -48,8 +49,74 @@ tokens on every sampling step. `fl2va` still chains well - the voice is
 carried by the frame relay rather than pinned - and it is the configuration
 that went through blind review.
 
-Rule of thumb: **ref2va** when you want voice or identity explicitly
-anchored, **fl2va** when you want the lightest, fastest chain.
+Both files are **exactly the same size** at every quant level - fl2va and ref2va
+are byte-identical in bytes, so there is no VRAM or disk saving in choosing one.
+"Lighter" means fewer tokens per sampling step, because there are no reference
+rows riding along; it has never meant a smaller file.
+
+What you actually trade:
+
+* **`ref2va`** carries reference rows - voice anchoring, the identity bank, and
+  reference images. It holds a supplied keyframe only *softly*.
+* **`fl2va`** has no reference rows at all, but it **lands on a supplied frame**.
+  Measured against the same frame: **26.35 dB on fl2va versus 16.15 dB
+  (turbo, 6 steps) and 16.81 dB (stock, 20 steps) on ref2va + keyframe.** The
+  stock control rules out the sampler - the checkpoints genuinely differ. fl2va
+  can also take a first *and* last frame and plan a camera move between them,
+  which ref2va cannot do at all.
+
+Rule of thumb: **ref2va when identity or voice must persist, fl2va when a shot
+must start exactly where the last one ended.**
+
+## Drift on long chains, and the dials that fight it
+
+Chained shots accrete detail. Each one conditions on the previous shot's own
+output, so invented texture compounds. Measured over **ten shots at 960x544**
+with all three of the following on:
+
+| control | shipped | what it does |
+| --- | --- | --- |
+| `memory_frames` | `0` | The big one. The bank's RECENT slots feed accreted output forward on top of the pin. At `0` the only reference is shot 1, which nothing has been added to yet. Luma drift 1.055 -> 1.022 per hop, chroma 1.086 -> 1.039, and the drift stops *accelerating* (4.2->6.7%/hop becomes 2.3->2.0%). Identity and framing held; framing actually improved. |
+| `master_normalize` | `luma+contrast` | Levels brightness **and** contrast of the finished chain to one target taken from shot 1. Matching only the mean masks a contrast ratchet while it compounds underneath. |
+| `pin_renorm` | `on` | Holds each pinned latent at shot 1's sigma. The pin's own sigma climbs every hop, and that inflated pin is what the next shot is handed. |
+
+Residual is about **1.02 per hop**. Not zero - long chains still drift, slowly.
+
+`chain_gain_control` is the other half: texture ratchets about 1.3x per join, so
+set it to `flatten` on chains longer than about five shots.
+
+`pin_noise` is small and scene-dependent (-1% to -2% per hop) and gets worse
+above `0.10`. It is not the fix it was described as in 2.1.5.
+
+### Dials that do nothing under `context_pin`
+
+Verified in source rather than assumed. All three ship at `0` so nobody spends
+time tuning a dead control:
+
+* `join_anchor_noise` - noises KEYFRAME latents, and `context_pin` creates no
+  join keyframes.
+* `handoff_release` - belongs to `continuity=latent_handoff`.
+* `bank_ref_noise` - reaches bank reference *images*, which measurement shows
+  are not the carrier.
+
+### Two-pass upscale
+
+Needs the H3 latent-upscaler pack, and is **not usable** with
+`continuity = context_pin` or `latent_handoff`, or with an audio spine: those
+carry raw latents or one locked denoise trajectory across the join, and a
+two-pass render cannot preserve either. The node stops with an error naming the
+clash rather than quietly weakening the join. Available on `cut`, `seamless`,
+`seamless_tail`, `first_frame` and `flf_chain`.
+
+* `two_pass_upscale` `OFF` - each shot renders low-res through `pass1_fraction`
+  of the steps, upscales in latent space, finishes at full res.
+* `upscale_factor` `1.5` - pass-1 size is size/factor, snapped to /32.
+* `pass1_fraction` `0.4` - verified clean. Past ~0.5 pass 2 cannot erase the
+  upscale pattern and a ghost/moire lattice appears.
+* `upscale_audio_denoise` `0.35` - how much pass 2 may rewrite audio. `0` locks
+  pass-1 audio (safest for voice), `1` is a full remix.
+
+---
 
 ## MASTER CONTROLS (`H3StudioControls`)
 
@@ -263,6 +330,130 @@ same place, so exactly one owns it at a time:
 
 Either way, stock first/last anchors always work and you do not have to
 choose. If you see a log line about standing down, that is the healthy path.
+
+---
+
+## New in 2.2.4
+
+### `reference_subjects` - more than one person in your references
+
+Until 2.2.4 every reference picture was declared to the model as a photograph of
+`<Subject 1>`. With one character that is correct. With several it told the model
+that pictures of different people were all the same individual, and it rendered
+the average - which is why multi-character reference sets came back resembling
+nobody.
+
+`reference_subjects` groups the pictures. Comma counts, in picture order:
+
+| value | meaning |
+| --- | --- |
+| *(empty)* | all pictures are one person - the pre-2.2.4 behaviour, unchanged |
+| `3,3` | pictures 1-3 are person A, 4-6 are person B |
+| `2,2,2` | three people, two pictures each |
+
+Only `<Subject 1>` is described as speaking, because H3's voice conditioning is
+single-speaker. Counts that do not add up are corrected rather than rejected.
+
+### `walk_folder` on the prompt source - queue a folder of scenes
+
+`start_index` normally selects a block *inside* one file. Turn `walk_folder` on
+and it selects **which file**, walking the chosen folder in sorted order and
+emitting the whole file.
+
+Wire `start_index` to a `PrimitiveInt` set to `increment` and queue N times to
+render a folder of finished scripts unattended. This exists because an H3 script
+uses `---` for **shot** boundaries, so scenes cannot be concatenated into one
+file the way LPFF prompt batches can - a folder is the only way to batch them.
+
+### `reference_video` - hand H3 an existing clip
+
+New optional inputs on the sampler, fed by the `V2V REFERENCE` lane in the
+workflow (`Load Video` -> `Get Video Components` -> `H3 Reference Video`). Ships
+muted.
+
+**It is scene and appearance conditioning, not motion control.** H3 is told a
+video reference is "a clip from an earlier moment of this same continuous scene"
+and asked to keep its framing, camera distance, room contents and colour
+temperature. There is no pose, depth or optical-flow path in H3, so the subject
+will not copy the movement in your clip.
+
+Keep the window short. References are subsampled to 2 fps and then ride through
+**every** sampling step, so a 25-second clip is roughly 50 reference frames of
+permanent per-step cost. `H3ReferenceVideo` trims for you and prints what the
+window will cost. Requires `ref2va`; fl2va has no reference rows and ignores it.
+
+---
+
+## Automatic reference casting (`H3AutoRefs`)
+
+Optional. Feeds the sampler's `reference_images` from a folder of character
+photos, choosing which ones by reading your script - so a multi-shot episode
+casts itself instead of you re-picking `LoadImage` slots per scene.
+
+**How it decides.** It scans the prompt for the *names of subfolders* under
+`refs_root`, case-insensitively and on word boundaries. One subfolder per
+character:
+
+```
+<refs_root>/
+    ZARA/     zara_wide_01.png  zara_wide_02.png  ...
+    GLYPH/    glyph_wide_01.png ...
+    MARCUS/   ...
+```
+
+A script that says "Zara pushes her glasses up" matches `ZARA/` and loads that
+folder's images. Matching is on the folder name only - the image filenames
+inside can be anything.
+
+**Dialogue is stripped before the scan.** `<d>...</d>` blocks, quoted speech and
+`says, '...'` are removed first, so a character who is *talked about* but not
+present never gets cast. This is deliberate and field-proven.
+
+**What it loads.** First three matched characters, in first-mention order,
+`max_per_character` images each (default 3) taken in sorted filename order,
+capped at the model's 9 reference slots. It then prepends identity bindings to
+the prompt - `<Picture 1>, <Picture 2> are the same person (Zara).` - and prints
+what it picked:
+
+```
+[H3AutoRefs] 3 ref(s): ZARA/zara_wide_01.png -> <Picture 1>; ...
+```
+
+Glance at that line to confirm the right cast loaded.
+
+**The shipped workflow wires three of those nine outputs.** `H3AutoRefs` exposes
+`ref_1` ... `ref_9`; the Seamless chain batches `ref_1`, `ref_2` and `ref_3` into
+the sampler and leaves the rest unconnected. One character at
+`max_per_character` 3 therefore works exactly as described, but two or three
+matched characters produce more images than the graph carries, and the surplus
+is dropped without a warning. Either keep `max_per_character` x characters at 3
+or fewer, or extend the `auto refs` batch chain in the REFERENCE IMAGES group to
+take `ref_4` and beyond.
+
+| widget | default | what it does |
+| --- | --- | --- |
+| `refs_root` | *(empty)* | Folder holding one subfolder per character. Empty resolves to `input/h3_refs/`. Relative paths resolve under `input/`; absolute paths work too. |
+| `max_per_character` | `3` | Images per matched character. Front / three-quarter / profile sets hold identity best. |
+| `characters` | *(empty)* | Comma-separated folder list that **overrides the scan entirely**. Use it when the prose does not name someone. |
+| `overrides` | *(empty)* | Folder remaps, e.g. `zara=zara_preflash` to swap a character's set for particular scenes. Clear it afterwards. |
+| `on_no_match` | `error` | `error` stops the run when nothing matches - an identity render without references is a wasted render. `no_reference` continues without them, which is what you want for scenes that have no recurring cast. |
+
+**The gotcha worth knowing.** The scan reads the *prose*, so the character must
+be named there. A scene called `09_glyph_reaches_through_the_front_door.txt`
+whose description only says "a seven-foot figure of liquid chrome" matches
+nothing - the filename is not scanned. Around 18% of our own archive scenes are
+written that way. Two fixes: name the character in the description, or type the
+folder name into `characters`.
+
+**Scenes with no cast** - a dashcam, an empty harbour - should either set
+`on_no_match` to `no_reference` or not use the node at all.
+
+**What references do and do not carry.** Measured: they restore appearance
+outside the model's usual range - a character's solid-black eyes came back
+correctly with references and did not without. They do **not** carry *scale*: a
+seven-foot character still rendered near human height, because nothing in a
+photograph of someone standing alone states their size. Scale needs an in-frame
+comparison or explicit prose.
 
 ---
 

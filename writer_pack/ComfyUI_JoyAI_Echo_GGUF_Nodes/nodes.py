@@ -3632,6 +3632,87 @@ def _load_boundary_rules(join_style: str) -> str:
     return rules
 
 
+def _spoken_words(shot_text):
+    """Words actually spoken: <d>...</d> first, quoted speech second."""
+    import re as _re
+    d = _re.findall(r"<d>(?:\[[^\]]*\])?(.*?)</d>", shot_text, _re.S)
+    if not d:
+        d = _re.findall(r'"([^"]{4,})"', shot_text)
+    return sum(len(x.split()) for x in d)
+
+def _budget_warn(prompts, blo, bhi, slack=1.25):
+    """Report shots whose spoken lines overrun the budget they were given.
+
+    Only flags above bhi*slack - a shot at 21 words against a 20-word
+    ceiling is not what this exists to catch; one at 45 is.
+    """
+    bad, speaking = [], 0
+    for i, p in enumerate(prompts, 1):
+        n = _spoken_words(p if isinstance(p, str) else str(p))
+        if n:
+            speaking += 1
+        if n and n > bhi * slack:
+            bad.append((i, n))
+    # The check was one-sided: it only ever caught lines that were too
+    # LONG, and skipped a shot with zero words as "silent". A script
+    # with no dialogue at all therefore passed in silence - which is the
+    # worse failure, because a crammed line is audible and a slideshow
+    # is not discovered until the render is watched.
+    if prompts and speaking == 0:
+        print("[JoyEcho] WARNING: NO dialogue in any of the %d shot(s). "
+              "This will render as a silent slideshow. If that is not "
+              "deliberate, the writer has opted out of speech - say so "
+              "in the brief, or check the shot count is not so high "
+              "that it padded with wordless beats."
+              % len(prompts), flush=True)
+    elif prompts and speaking < len(prompts) / 3.0:
+        print("[JoyEcho] WARNING: only %d of %d shot(s) contain "
+              "dialogue. A long piece carried by that little speech "
+              "plays as a slideshow."
+              % (speaking, len(prompts)), flush=True)
+    for i, n in bad:
+        print("[JoyEcho] WARNING shot %d: %d spoken words against a "
+              "%d-%d budget for this clip length. Speech that overruns "
+              "the clip renders crammed or garbled - shorten the line, "
+              "or raise frames_per_shot." % (i, n, blo, bhi), flush=True)
+    if bad:
+        print("[JoyEcho] %d of %d shot(s) overrun the dialogue budget."
+              % (len(bad), len(prompts)), flush=True)
+    return bad
+
+
+def _speakable_budget(num_frames, fps, chained):
+    """One clip length -> one word budget, shared by every writer path.
+
+    Returns (secs, speakable, lo, hi) or None when no duration was supplied.
+
+    Chained styles spend ~1s of each later block on the discarded replay and
+    ~4s on the airlock and settle, so the speakable span is shorter than the
+    block. Sizing dialogue to the full block is the failure that chopped the
+    line head (render-verified 2026-08-10).
+
+    This exists because the main path and the revise path each had their own
+    copy of this arithmetic and they had already diverged - revise used the
+    raw clip length and so over-budgeted every line on a chained render.
+    """
+    if not num_frames or num_frames <= 0:
+        return None
+    _fps = fps if (fps and fps > 0) else 25.0
+    secs = num_frames / _fps
+    speak = max(3.0, secs - 5.0) if chained else secs
+    return secs, speak, max(6, int(round(speak * 1.2))), int(round(speak * 2.0))
+
+
+def _no_duration_warning(where):
+    """num_frames=0 means the writer is guessing. Say so - it used to be mute."""
+    print("[JoyEcho] %s: num_frames is 0, so NO clip duration was given to "
+          "the writer. It will size dialogue for the ~10 second clip assumed "
+          "in the system prompt, which is wrong for any other shot length and "
+          "is the usual cause of crammed, garbled speech. Set num_frames on "
+          "this node to the SAME value as the sampler's frames_per_shot."
+          % where, flush=True)
+
+
 class JoyEcho_PromptFormat:
     """Helper node providing the official prompt writing system prompts.
 
@@ -4032,17 +4113,31 @@ class JoyEcho_LLMEnhance:
             _rev_user = "SCRIPT TO REVISE:\n" + json.dumps(
                 {"prompts": _oshots}, ensure_ascii=True)
             _fps_r = fps if (fps and fps > 0) else 25.0
-            if num_frames and num_frames > 0:
-                _secs = num_frames / _fps_r
-                _lo = max(6, int(round(_secs * 1.2)))
-                _hi = int(round(_secs * 2.0))
+            # Same budget as the main path, from the same function. This used
+            # to size against the RAW clip length while the main path
+            # subtracted the airlock and replay, so on a chained render revise
+            # asked for lines that could not fit the block.
+            _rev_chained = not join_style.startswith("cuts")
+            _rev_budget = _speakable_budget(num_frames, _fps_r, _rev_chained)
+            _rev_lo = _rev_hi = None
+            if _rev_budget is None:
+                _no_duration_warning("REVISE")
+            else:
+                _secs, _rev_speak, _rev_lo, _rev_hi = _rev_budget
                 _rev_user += (
                     f"\n\nEach shot renders as one continuous clip about "
                     f"{_secs:.1f} seconds long at {int(round(_fps_r))} fps. Pace "
                     f"every shot's action to fill that duration, and size each "
-                    f"spoken line to roughly {_lo}-{_hi} words so the speech fits "
-                    f"the clip with room for breath - lengthen or tighten the "
-                    f"existing lines as needed WITHOUT changing what they say.")
+                    f"spoken line to roughly {_rev_lo}-{_rev_hi} words so the "
+                    f"speech fits the clip with room for breath - lengthen or "
+                    f"tighten the existing lines as needed WITHOUT changing what "
+                    f"they say.")
+                if _rev_chained:
+                    _rev_user += (
+                        f" Of those {_secs:.0f} seconds only about "
+                        f"{_rev_speak:.0f} are speakable: the first ~2 seconds "
+                        "of every shot after the first are a silent hold and "
+                        "the last ~2 seconds are a silent settle.")
 
             _payload = json.dumps({
                 "model": model_name,
@@ -4124,6 +4219,10 @@ class JoyEcho_LLMEnhance:
                 _fixed.append(_n)
             print(f"[JoyEcho] REVISE: {len(_fixed)} shots revised "
                   f"({_n_id} identity sentence(s) restored).", flush=True)
+            # Revise returns ~270 lines before the main path's budget check,
+            # so without this nothing ever looked at what came back.
+            if _rev_lo and _rev_hi:
+                _budget_warn(_fixed, _rev_lo, _rev_hi)
             return (json.dumps({"prompts": _fixed}, ensure_ascii=True),)
 
         if not api_key.strip():
@@ -4190,6 +4289,9 @@ class JoyEcho_LLMEnhance:
         # so it fills the time with beats + proportionally longer speech instead
         # of a 10s line stranded in a 14s clip. num_frames=0 -> unchanged.
         _fps = fps if (fps and fps > 0) else 25.0
+        _have_budget = bool(num_frames and num_frames > 0)
+        if not (num_frames and num_frames > 0):
+            _no_duration_warning("LLMEnhance %s" % mode)
         if num_frames and num_frames > 0:
             secs = num_frames / _fps
             # Chained styles spend ~1s of every later block on the discarded
@@ -4198,9 +4300,7 @@ class JoyEcho_LLMEnhance:
             # is exactly the failure that dropped the airlock and chopped
             # the line head (render-verified 2026-08-10).
             _chained = not join_style.startswith("cuts")
-            _speak = max(3.0, secs - 5.0) if _chained else secs
-            lo = max(6, int(round(_speak * 1.2)))
-            hi = int(round(_speak * 2.0))
+            _, _speak, lo, hi = _speakable_budget(num_frames, _fps, _chained)
             user_msg += (
                 f"\n\nEach shot is a single continuous clip about {secs:.1f} "
                 f"seconds long (at {int(round(_fps))} fps). Pace every shot to "
@@ -4338,6 +4438,10 @@ class JoyEcho_LLMEnhance:
                     raise ValueError("output missing 'prompts' array")
                 if not _d["prompts"]:
                     raise ValueError("'prompts' array is empty")
+                # First thing that checks the budget computed above
+                # was actually honoured. lo/hi only exist when num_frames > 0.
+                if _have_budget:
+                    _budget_warn(_d["prompts"], lo, hi)
                 data = _d
                 break
             except (json.JSONDecodeError, ValueError) as e:

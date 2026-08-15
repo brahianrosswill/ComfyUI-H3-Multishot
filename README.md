@@ -119,6 +119,414 @@ no Motion-Context → `continuity=first_frame`.
 
 ---
 
+## 2.2.5 - a chain that could refuse to start, an upscale that could eat the host, and one-click install from the Registry
+
+### Fixed: chained shots could stall before the first sampling step
+
+The auto-reserve learns how much activation pool a given shape needs by
+measuring it. On a chained render the later shots often load *partially*
+- the weights are already resident, so only part of them streams in. The
+old code discarded every partial measurement as untrustworthy, which meant a
+chained shot could never contribute what it learned. If the very first shot was
+also partial, the cache stayed empty forever, the fallback reserve was too small
+for the shape, and every subsequent attempt failed the same way. A render could
+sit there refusing to start with no error to point at.
+
+Partial measurements are now kept when the pool is genuinely large, and
+clamped by a named floor (`_auto_cache_floor`) that only ever ratchets
+upward, never down. Verified live on a six-shot chain: offload dropped from
+4308 MB to 638 MB once the cache started learning.
+
+The warning that fires when a shot asks for far more pool than is available
+now distinguishes the two cases it was conflating. If this shape has been
+measured before, it says so and gives you the number. If it is the first run at
+this shape, it says *that* instead of implying something is broken.
+
+### Fixed: `output_scale` was documented backwards
+
+With an upscale model selected, `output_scale` is not a multiplier
+on top of it - the model applies its own fixed factor (4x for the
+ESRGAN family) and `output_scale` is the **final** size
+you want, not an extra step. The tooltip said otherwise, in both samplers. Both
+are corrected, and `upscale_model_name` now explains the interaction
+rather than leaving you to discover it.
+
+### New: the upscale says what it will cost before it runs
+
+Decoded frames accumulate in host RAM until the master is joined, so the bill
+is per-shot multiplied by shot count. A 1344x768 chain through a 4x model is
+5376x3072 per frame, and an `output_scale` left at a value that
+looked harmless has taken machines down at the join - after all the
+sampling was already paid for.
+
+Before sampling starts you now get the projected dimensions, MB per frame, GB
+per shot and GB total, measured against actual free RAM:
+
+```
+[H3Memory] upscale will produce 5376x3072 (4.0x): 198 MB per frame
+[H3Memory] WARNING: that will not fit. Frames are held in host RAM
+until the master is joined - lower output_scale to 1.60
+or lower, or turn the upscaler off.
+```
+
+### New: the folder walk prints which index is which file
+
+Queueing a folder told you nothing about the mapping between
+`EPISODE INDEX` and the file it would pick, so a cancelled run left
+you doing off-by-one arithmetic against a single log line to work out where to
+restart. The ordered list now prints once per folder per session, and each job
+reports its own position and the index to set to resume there. It re-prints if
+the folder's file count changes, which is the one case where a remembered
+listing would mislead.
+
+### Fixed: garbled speech - the writer was never told how long a shot is
+
+`num_frames` on the LLM Enhance node defaults to `0`,
+and it shipped as `0` in the bundled workflow. At zero, the writer is
+told **nothing** about clip length, so it sizes every spoken line
+for the "~10 second clip" assumed in the system prompt regardless of what you
+actually render. Too long for a short shot is crammed, garbled speech; too short
+for a long one is dead air.
+
+Three things now close that:
+
+- `num_frames = 0` prints a warning naming the widget and telling
+you to match it to the sampler's `frames_per_shot`. It used to pass
+in complete silence.
+
+- The bundled workflow ships with `num_frames` set to
+**243**, the same value its `frames_per_shot` already
+uses, so a fresh install is correct out of the box.
+
+- Shots whose dialogue overruns the budget are reported at generation time
+with the numbers, instead of being discovered forty minutes later by ear. The
+check is symmetric: a script that comes back with **no dialogue at
+all** is also flagged, because that renders as a silent slideshow.
+
+### Fixed: `revise` asked for lines that could not fit
+
+Chained styles spend about five seconds of every block on the replay, airlock
+and settle, so the speakable span is shorter than the clip. The main writer
+subtracted that. `revise` did not - it sized lines against the
+raw clip length, from its own separate copy of the arithmetic.
+
+On a 243-frame chained shot that meant `revise` asked for
+**12-20 words where only 6-10 fit**: double the budget,
+every line, which is exactly the overrun that renders as garble. It also never
+checked its own output, because it returns long before the check the main path
+runs.
+
+Both paths now call one `_speakable_budget()` and both check their
+result, so they cannot drift apart again. The duplicate arithmetic is why they
+had.
+
+### Changed: the story writer stops prescribing creativity
+
+The system prompts had accumulated a five-beat dramatic arc, a banned-cliche
+list, a "land near seven shots" target and a dialogue quota. None of those are
+properties of the model - they are one person's taste, hardcoded, and they
+were flattening every brief toward the same shape.
+
+They are gone. What remains is what the renderer actually needs: valid JSON,
+identity restated verbatim per shot so the room does not drift, literal physical
+description over mood language because abstract adjectives have nothing to
+render, and the note that audio is half the model. The story, its length, its
+tone and whether any given shot speaks are the model's call now.
+
+### Changed: the node menu no longer says "Rift"
+
+Four nodes sat in a category called `Rift`, which means nothing to
+anyone who is not me. They are in `H3/script` now, the labels drop the
+prefix, and ten console messages say `[H3 Multishot]` - the name
+you actually installed - instead of `[Rift]`.
+
+> **Saved workflows are unaffected.** Categories are
+never written into a graph and display names resolve fresh on load. The
+underlying class names are deliberately *unchanged*, because those strings
+*are* written into every saved `.json` and renaming them would
+turn your nodes into red missing-node boxes.
+
+### New: installable from the ComfyUI Registry
+
+The pack is published as `comfyui-h3-multishot`, so ComfyUI-Manager
+can find and update it without a manual clone. The zip on this page stays the
+complete bundle - both node packs, the workflows and the docs - and
+remains the right choice if you want everything in one drop.
+
+The dependency list is deliberately empty. Every import this pack uses
+(`torch`, `torchaudio`, `psutil`,
+`av`, `numpy`, `PIL`) is already guaranteed by
+ComfyUI itself, and a custom node that declares `torch` can talk pip
+into replacing a working CUDA build with a CPU wheel.
+
+### Documentation: drift on long chains, and the dials that fight it
+
+`SETTINGS.md` gains a measured section on why chained shots accrete
+detail - each conditions on the previous shot's own output, so invented
+texture compounds - and which controls actually counter it. Measured over
+ten shots at 960x544:
+
+- `memory_frames = 0` is the big one. The bank's RECENT slots feed
+accreted output forward on top of the pin.
+
+- `master_normalize = luma+contrast` levels brightness
+**and** contrast of the finished chain.
+
+- `pin_renorm = on` holds each pinned latent at shot 1's sigma.
+
+- `chain_gain_control = flatten` on chains longer than about five
+shots - texture ratchets roughly 1.3x per join.
+
+Residual with all of those on is about **1.02 per hop**. Not
+zero. Long chains still drift, slowly. `pin_noise` is small,
+scene-dependent and gets worse above `0.10`; it is not the fix it was
+described as in 2.1.5.
+
+---
+
+
+## 2.2.4 - references for more than one person, a folder you can queue, and video references
+
+Four things people asked for or tripped over, plus the documentation that
+should have prevented two of the questions.
+
+### Fixed: reference images of different people blended into one face
+
+If you gave the sampler reference pictures of two characters, it rendered
+something that resembled neither. That was not you holding it wrong. Internally
+every reference picture was declared to the model as
+`<Picture N> is a reference photograph of <Subject 1>` -
+*the same* Subject 1, every time. With one character that is correct and
+it is why single-character references work well. With several you were telling
+the model that photographs of different people all showed one individual, and
+it produced the average.
+
+There is a new `reference_subjects` field on the sampler. Leave it
+empty and nothing changes - every picture is one person, exactly as before.
+Fill in comma counts in picture order to group them:
+
+```
+reference_subjects: 3,3 pictures 1-3 are person A, 4-6 are person B
+reference_subjects: 2,2,2 three people, two pictures each
+```
+
+Each group is then declared its own subject, with an explicit instruction that
+it is never blended with the others. Only Subject 1 is described as speaking,
+because H3's voice conditioning is single-speaker.
+
+### New: point the prompt source at a folder and queue the whole thing
+
+`start_index` has always selected a block *inside* one file.
+That works for LPFF-style prompt batches, where one file holds many prompts. It
+does not work for H3 scripts, because in an H3 script `---` separates
+**shots within one scene** - concatenating scenes into one file
+would fuse them into a single enormous take.
+
+Turn on the new `walk_folder` switch and `start_index`
+selects **which file** instead, walking the chosen folder in sorted
+order and emitting the whole script. Wire it to a Primitive set to
+`increment`, queue thirty times, and thirty finished scenes render
+unattended.
+
+### New: hand H3 an existing clip as a video reference
+
+There is now a `V2V REFERENCE` lane in the workflow - Load
+Video into Get Video Components into the new **H3 Reference Video**
+node, then into two new sampler inputs. It ships muted; un-mute the three nodes
+to use it.
+
+**Read what this is before you wire it.** H3 is told a video
+reference is "a clip from an earlier moment of this same continuous
+scene" and asked to keep its framing, camera distance, room contents and
+colour temperature. It is **scene and appearance conditioning**. It
+is **not motion control** - there is no pose, depth or optical
+flow path in H3, so your subject will not copy the movement in the clip. It
+borrows the place and the look, not the action.
+
+Keep the window short. References are subsampled to 2 fps and then ride
+through *every* sampling step, so a 25-second clip is roughly 50 reference
+frames of permanent per-step cost. The H3 Reference Video node trims to a window
+and prints what that window will cost before you commit to it. Requires ref2va;
+fl2va has no reference rows and ignores video references entirely.
+
+### Fixed: an empty prompt dropdown that blamed the wrong thing
+
+The prompt source finds `.txt` files through the
+`inspire_prompts` folder path, which is registered by
+**comfyui-inspire-pack**. Without that pack installed the path does
+not exist, so the dropdown came back empty however many prompt files you had,
+and the error blamed the prompts folder. It now tells you which of the three
+fixes applies: install the pack, register the path yourself in
+`extra_model_paths.yaml`, or set `manual_path` and ignore
+the dropdown. The dependency is written into INSTALL.md as well.
+
+### Documentation: what has to change between shots
+
+Several people have hit chains where shot 3 comes back as a near-copy of shot
+2. The prompting guide is partly responsible: rule 5 says to repeat descriptions
+word-for-word, and never said what must *differ*. Rule 5 is only about
+appearance and the room. It is not an instruction to restate the action, and
+when it gets read that way most of shot 3 is byte-identical to shot 2 - and
+the model is separately instructed to preserve the subject, the room and the
+colour temperature, so "keep everything the same" wins.
+
+There is now a sixth rule covering it. The short version: each shot's action
+must leave the world in a state the previous shot's world was not in, physical
+and irreversible, not a mood or a camera move. If you can swap two shots' action
+lines and the script still reads correctly, the model cannot tell them apart
+either.
+
+### Documentation: fl2va is not a smaller file
+
+Both this guide and INSTALL.md described fl2va as "lighter and
+faster", which everyone reasonably read as a size claim while choosing a
+file for a 24 GB card. It is not. **fl2va and ref2va are exactly the
+same size at every quant level.** "Lighter" only ever meant
+fewer tokens per sampling step, because there are no reference rows riding
+along.
+
+What actually separates them was never written down: **fl2va lands on a
+supplied frame and ref2va only nudges toward one.** Measured against the
+same frame, 26.35 dB on fl2va versus 16.15 dB on ref2va with a keyframe
+at 6 turbo steps - and 16.81 dB at 20 stock steps, which rules out the
+sampler and leaves the checkpoint. fl2va can also take a first *and* a
+last frame and plan a camera move between them, which ref2va cannot do at all.
+So: ref2va when identity or voice must persist, fl2va when a shot must start
+exactly where the last one ended.
+
+### Improved: the story writer, for thin briefs and long shot counts
+
+Give the writer a couple of characters and a genre with no plot, ask for
+fifteen shots, and it tended to return atmospheric moments rather than a story.
+That was the system prompt's fault in four specific ways, all now fixed.
+
+It was **calibrated to about seven shots and argued against more**
+- "most scenes land between 4 and 10", "go higher only when
+the story clearly has that many real beats", plus a padding test. Asked for
+fifteen, the model was simultaneously told to produce exactly that count and that
+this many was probably padding, and it resolved the contradiction by rationing one
+thin premise across the shots. It is now told the opposite: **a high count
+is an instruction to invent more story** - another location, a second
+complication, a character who arrives partway through, a reversal that changes
+what the earlier shots meant. The no-padding rule is unchanged and is exactly the
+point; the way to satisfy a high count is to invent enough real plot that no shot
+is padding.
+
+When the brief names **only characters and a genre**, the writer is
+now told plainly that it is the author: decide who wants what, the incident that
+starts it, the complication, the turn and the ending *before* writing any
+shot. Returning a series of moods involving the named characters is called out as
+the most common failure on a thin brief.
+
+**Dialogue density** now has a floor. Speech was marked optional
+per shot and non-speaking shots were actively encouraged, with nothing on the
+other side, so long pieces came back nearly silent. It now aims for two thirds or
+more of shots to carry speech, with silent shots as punctuation.
+
+And a new **FIT THE SHOT** section covering *both* dialogue
+and action. Overrunning the clip is what produces crammed, garbled speech and
+distorted motion, so the writer now budgets each shot - settle, action, line
+at an unhurried pace, a beat to land on - and cuts the action rather than
+speeding up the speech. One clear physical action per shot; if more than one is
+written, split the shot.
+
+### Note on saved workflows
+
+Every new control in this release is appended at the *end* of the
+node's input list. Widget values are stored positionally, so inserting a control
+anywhere else silently shifts every value after it in workflows you have already
+saved. Your existing graphs load unchanged.
+
+---
+
+
+## 2.2.3 - three ways a long render could waste itself, and a switch that did nothing
+
+Everything here is a fix. Nothing changed about how you use the workflow.
+
+### Fixed: long multi-shot renders died at the very last step
+
+A long job would sample every shot, upscale every shot, finish master
+normalize - and then die while assembling the result, with nothing
+written. Every expensive stage had already succeeded.
+
+```
+RuntimeError: DefaultCPUAllocator: not enough memory:
+you tried to allocate 33791016960 bytes.
+```
+
+That is **host RAM, not VRAM**, and it is one contiguous request.
+Upscaled frames were held on the host as fp32 for the whole run, and the final
+assembly then allocated a *second* complete timeline while the first was
+still alive. Peak was twice the timeline, and the timeline grows as
+`shots × frames × height × width × 3 × 4 bytes`
+with the upscale factor squared. Six shots of 243 frames upscaled is a 36.5 GB
+timeline and a ~70 GB peak, which no 64 GB machine can satisfy.
+
+Three changes: the timeline is now assembled into one preallocated buffer,
+releasing each shot as it is copied (bit-exact - the same bytes as before);
+frames are parked as fp16, which is well clear of the 8-bit the encoder writes
+anyway; and master normalize upcasts to fp32 for its arithmetic and writes back,
+so the memory saving costs no precision.
+
+**Effect:** six shots of 243 frames upscaled drops from ~70 GB
+peak to ~21 GB. Twelve shots of 192 frames drops from ~58 GB to ~31 GB.
+Both now fit in 64 GB with the per-shot upscale unchanged. Diagnosed by a
+second operator on a 3090 box; thank you.
+
+### Fixed: the auto-reserve inflated its own estimate until the render spilled
+
+If your chains got slower as they went - shot 1 fine, shot 3 sluggish,
+shot 4 crawling - this is why. After each shot the pack measures how much
+activation memory that shape needed. It subtracted the weight bytes
+*currently resident* rather than the model's full size, so whenever the
+model was only partly loaded the measurement came out too large by exactly the
+amount that had been offloaded. That number then raised the next shot's reserve,
+which left less room for the weights, which offloaded more.
+
+```
+shot 1 recorded 6.4 GB true 6.4 (full load - correct)
+shot 2 recorded 8.0 GB true 5.3 (2749 MB offloaded)
+shot 3 recorded 8.9 GB true 4.3 (4784 MB offloaded)
+shot 4 asked for 19.9 GB -> clamped -> 262 s/step
+```
+
+The overstatement equals the offload every time. The measurement now uses the
+model's full size, and a shot that offloaded weights records nothing at all
+- it measured a spill, not an activation pool.
+
+The cache also only ever grew, so a single bad shot poisoned a shape
+permanently. Entries written by earlier versions are **dropped once**
+on first load; you will see a line saying so, and those shapes re-measure on
+their next run.
+
+This does not make an over-committed render fit. If a shot
+honestly needs more memory than the card has you still have to lower
+`frames_per_shot` or resolution - the difference is that the
+warning now fires on true numbers instead of the reserve quietly climbing.
+
+### Fixed: the sol_attn and chunk_ffn switches did nothing
+
+Reported by **sdktertiaire2**. Those switches shipped ON, but the
+nodes they gate ship *bypassed* - they need third-party packs that
+cannot be bundled (`ComfyUI-sol-attn`,
+`comfyui-minimax-h3-blockcache-T8`). A toggle routing into a disabled
+node changes nothing and warns about nothing. That contradictory default was
+mine.
+
+Both now ship OFF so the panel states what the canvas actually does, and the
+panel is labelled with the fix: **install the pack, then select the node
+and press Ctrl+B to un-bypass it.** The switch only routes; it cannot
+enable a bypassed node. If you do not want those packs, leave the switches off
+and lose nothing - they are speed and memory optimisations, not quality
+features. Everything renders identically without them, just slower.
+
+The nodes stay bypassed on purpose. Enabling them by default would hard-fail
+every install that lacks the optimizer packs.
+
+---
+
+
 ## New in v2.2.2
 
 One fix, reported by a user against 2.2.1.
