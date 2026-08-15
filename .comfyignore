@@ -1,0 +1,17 @@
+# Build/editor droppings
+__pycache__/
+*.pyc
+*.pyo
+
+# Working backups. These matter more than they look: a backup left with a .py
+# suffix gets picked up by ComfyUI's custom-node scanner and imported as a
+# second copy of the module, which double-registers every node in it.
+*.bak
+*.orig
+*.rej
+*~
+
+# Local scratch
+.DS_Store
+Thumbs.db
+*.log

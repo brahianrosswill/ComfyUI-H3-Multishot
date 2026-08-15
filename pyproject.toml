@@ -1,0 +1,22 @@
+[project]
+name = "comfyui-h3-multishot"
+description = "Multi-shot chaining for MiniMax-H3 audio+video: carry identity, voice and framing across shots so a sequence reads as one take."
+version = "2.2.5"
+license = { file = "LICENSE" }
+readme = "README.md"
+requires-python = ">=3.10"
+
+# Deliberately empty. Every third-party import in this pack -- torch,
+# torchaudio, psutil, av, numpy, PIL -- is already guaranteed by ComfyUI's own
+# requirements.txt. Declaring torch or torchaudio here invites pip to resolve
+# and reinstall them, which is a well-known way to replace a working CUDA build
+# with a CPU wheel on someone else's machine.
+dependencies = []
+
+[project.urls]
+Repository = "https://github.com/jlucasmcrell/ComfyUI-H3-Multishot"
+
+[tool.comfy]
+PublisherId = "joeygambino"
+DisplayName = "H3 Multishot"
+Icon = ""

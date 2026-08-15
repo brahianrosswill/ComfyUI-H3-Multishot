@@ -62,6 +62,11 @@ _TXT_PREFIX = "TXT: "
 _JSON_PREFIX = "JSON: "
 _EMPTY = "(no prompt files found)"
 
+# folder -> pool size, so the ordered walk listing prints once per folder per
+# session instead of ahead of every queued job. Re-prints if the folder's file
+# count changes, which is the case where a stale listing would mislead.
+_WALK_LISTED = {}
+
 _BLOCK_SPLIT = re.compile(r"\n\s*-+\s*\n")
 _BLOCK_PATTERN = re.compile(
     r"^(?:(?:name:(?P<name>.*?)|positive:(?P<positive>.*?)|negative:(?P<negative>.*?))\n*)+$",
@@ -172,6 +177,23 @@ class RiftPromptSource:
                                             "Filter source_file to one folder (the pack's frontend "
                                             "script filters the dropdown live). Appended last so "
                                             "saved widget order is preserved."}),
+                # NEW IN 2.2.4 - appended after `folder` for the same reason
+                # that one was: widgets_values is positional and inserting
+                # earlier shifts every saved graph.
+                "walk_folder": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "index picks the FILE",
+                    "label_off": "index picks the BLOCK",
+                    "tooltip": "OFF (default): start_index selects a block "
+                               "INSIDE source_file, as always. ON: start_index "
+                               "selects WHICH FILE, walking the folder chosen "
+                               "above in sorted order, and the whole file is "
+                               "emitted. Wire start_index to a PrimitiveInt set "
+                               "to 'increment' and queue N times to render a "
+                               "folder of finished scripts unattended. Needed "
+                               "because an H3 script uses --- for SHOT "
+                               "boundaries, so scenes cannot be concatenated "
+                               "into one file the way LPFF batches can."}),
             },
         }
 
@@ -179,7 +201,7 @@ class RiftPromptSource:
     RETURN_NAMES = ("story_idea", "character", "count")
     OUTPUT_IS_LIST = (True, True, False)
     FUNCTION = "load"
-    CATEGORY = "Rift"
+    CATEGORY = "H3/script"
 
     @classmethod
     def VALIDATE_INPUTS(cls, source_file=None, folder=None, **kwargs):
@@ -192,29 +214,94 @@ class RiftPromptSource:
         return True
 
     @classmethod
-    def IS_CHANGED(cls, source_file, load_cap=0, start_index=0, character_override="", manual_path="", folder="(all)"):
+    def IS_CHANGED(cls, source_file, load_cap=0, start_index=0, character_override="",
+                   manual_path="", folder="(all)", walk_folder=False):
+        # walk_folder makes start_index choose the file, so it has to be part of
+        # the cache key together with the folder - otherwise queueing with an
+        # incrementing index re-serves the first file from cache.
         p = Path(manual_path.strip()) if manual_path.strip() else _resolve(source_file)
         key = manual_path.strip() or source_file
+        if walk_folder:
+            key = f"walk:{folder}:{start_index}:{key}"
         try:
             return f"{key}:{p.stat().st_mtime}:{load_cap}:{start_index}:{character_override}"
         except Exception:
             return key
 
-    def load(self, source_file, load_cap=0, start_index=0, character_override="", manual_path="", folder="(all)"):
-        if (folder and folder != "(all)" and not manual_path.strip()
-                and _folder_of(source_file) != folder):
-            raise ValueError(
-                f"PromptSource: source_file {source_file!r} is not in the selected "
-                f"folder {folder!r}. Pick a file from that folder, set folder to "
-                f"(all), or use manual_path.")
+    def load(self, source_file, load_cap=0, start_index=0, character_override="",
+             manual_path="", folder="(all)", walk_folder=False):
         manual = manual_path.strip()
+        if walk_folder and not manual:
+            # start_index selects the FILE, not a block inside one. An H3 script
+            # uses --- for shot boundaries, so a folder of finished scripts is
+            # the only way to batch scenes; this walks it.
+            pool = [e for e in _list_files() if e != _EMPTY]
+            if folder and folder != "(all)":
+                pool = [e for e in pool if _folder_of(e) == folder]
+            if not pool:
+                raise ValueError(
+                    f"PromptSource: walk_folder is on but folder {folder!r} "
+                    f"holds no prompt files. Pick a folder that has some, or "
+                    f"turn walk_folder off.")
+            _pos = int(start_index) % len(pool)
+            source_file = pool[_pos]
+            # Print the whole ordered list ONCE per folder per session. Without
+            # it the index-to-file mapping is invisible until you have already
+            # run the job, and after a cancel you are left doing off-by-one
+            # arithmetic against a single log line to work out where to restart.
+            _seen = _WALK_LISTED.get(folder)
+            if _seen != len(pool):
+                _WALK_LISTED[folder] = len(pool)
+                print("[PromptSource] walk order for %s (%d file(s)) - "
+                      "EPISODE INDEX is 0-based, so the number on the left is "
+                      "what to set to start there:" % (folder, len(pool)),
+                      flush=True)
+                for _i, _e in enumerate(pool):
+                    print("    %3d  %s" % (_i, _e), flush=True)
+            print("[PromptSource] walk %d/%d (EPISODE INDEX %d) -> %s   "
+                  "| to resume here set EPISODE INDEX = %d"
+                  % (_pos + 1, len(pool), _pos, source_file, _pos), flush=True)
+            if _pos == len(pool) - 1:
+                print("[PromptSource] that was the LAST file in %s; the next "
+                      "queued job wraps back to index 0." % folder, flush=True)
+            start_index, load_cap = 0, 0     # the whole file is the unit now
+        elif (folder and folder != "(all)" and not manual
+                and _folder_of(source_file) != folder):
+            # `folder` narrows the dropdown; it is not a veto on a file the user
+            # deliberately selected. Outside walk mode it has no other job, so a
+            # mismatch is a stale-filter annoyance rather than an error - and
+            # failing the whole prompt over it wasted a queued run.
+            print("[PromptSource] note: folder filter is %r but the chosen file "
+                  "is in %r. Using the file you picked. (The filter only "
+                  "selects the pool when walk_folder is ON.)"
+                  % (folder, _folder_of(source_file)), flush=True)
         if manual:
             p = Path(manual).expanduser()
             is_json = p.suffix.lower() == ".json"
         else:
             if source_file == _EMPTY:
-                raise ValueError("PromptSource: no prompt files found in the inspire prompts tree "
-                                 "or input/rift_prompts/. Set manual_path to a file instead.")
+                # Name the CAUSE, not the symptom. The .txt root comes from
+                # folder_paths.get_folder_paths("inspire_prompts"), a key that
+                # comfyui-inspire-pack registers. Without that pack installed
+                # the key does not exist, _txt_root() returns None and this
+                # dropdown is empty however full the prompts folder is - which
+                # reads as "the node is broken" rather than "a dependency is
+                # missing". Cost a real debugging session on 2026-08-14.
+                raise ValueError(
+                    "PromptSource: no prompt files found.\n"
+                    "  .txt files are located through the 'inspire_prompts' "
+                    "folder path, which is registered by comfyui-inspire-pack. "
+                    "%s\n"
+                    "  Fix by EITHER installing comfyui-inspire-pack and putting "
+                    "your prompts in its prompts/ folder, OR adding this to "
+                    "extra_model_paths.yaml and restarting:\n"
+                    "      my_prompts:\n"
+                    "          base_path: D:/path/to/your/prompts/\n"
+                    "          inspire_prompts: .\n"
+                    "  OR just set manual_path to a file and ignore the dropdown."
+                    % ("That pack does NOT appear to be installed."
+                       if _txt_root() is None else
+                       "It is registered, but no .txt files were found under it."))
             p = _resolve(source_file)
             is_json = source_file.startswith(_JSON_PREFIX)
         if p is None or not p.exists():
@@ -244,7 +331,7 @@ class RiftPromptSource:
             set_last_speakers(speakers)
             vrefs = data.get("voice_refs") or {}
             set_last_voice_refs(vrefs)
-            print(f"[Rift] PromptSource: {p.name} (json, {len(arr)} shots, 1 item)"
+            print(f"[H3 Multishot] PromptSource: {p.name} (json, {len(arr)} shots, 1 item)"
                   + (f", speakers: {' '.join(speakers)}" if speakers else ", no speaker tags")
                   + (f", voice anchors: {', '.join(vrefs)}" if vrefs else "")
                   + ".", flush=True)
@@ -284,12 +371,12 @@ class RiftPromptSource:
         if not items:
             raise ValueError(f"PromptSource: {p.name} yielded no blocks "
                              f"(total {total}, start_index {start_index}, load_cap {load_cap}).")
-        print(f"[Rift] PromptSource: {p.name} (txt, {len(items)}/{total} blocks).", flush=True)
+        print(f"[H3 Multishot] PromptSource: {p.name} (txt, {len(items)}/{total} blocks).", flush=True)
         return (items, names, len(items))
 
 
 NODE_CLASS_MAPPINGS = {"RiftPromptSource": RiftPromptSource}
-NODE_DISPLAY_NAME_MAPPINGS = {"RiftPromptSource": "Rift Prompt Source (txt briefs + json scripts)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"RiftPromptSource": "Prompt Source (txt briefs + json scripts)"}
 
 # deprecated alias - saved workflows made before the rename still
 # reference the old key; keep it resolving so they open.

@@ -343,6 +343,25 @@ def _write_shot_mp4(imgs, wav, sr, prefix, label, tag):
         return None
 
 
+
+def _up_model_factor(model, default=4.0):
+    """The fixed enlargement factor of a loaded upscale model.
+
+    Needed to predict output size before anything is upscaled. ESRGAN-family
+    models expose it as `scale`; fall back to 4x, which is what almost every
+    model in circulation is, rather than refusing to predict.
+    """
+    for attr in ("scale", "scale_factor", "upscale_factor"):
+        v = getattr(model, attr, None)
+        if v is None:
+            v = getattr(getattr(model, "model", None), attr, None)
+        try:
+            if v and float(v) > 0:
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+    return default
+
 def _upscale_frames(imgs, scale, model, tag):
     """Enlarge decoded frames, AFTER sampling. Pixels, never latents.
 
@@ -650,12 +669,13 @@ def _auto_cache_load():
 
 
 def _auto_cache_store(key, pool_bytes):
+    """Record a pool measurement. Returns True if it raised the stored value."""
     cache = _auto_cache_load()
     prev = cache.get(key, 0)
     # keep the largest pool ever seen for the shape; shrinking on a lucky
     # run risks the cliff on the next unlucky one
     if pool_bytes <= prev:
-        return
+        return False
     cache[key] = int(pool_bytes)
     try:
         import io as _io
@@ -666,6 +686,20 @@ def _auto_cache_store(key, pool_bytes):
     except Exception as e:
         print(f"[H3AutoReserve] cache write failed ({e}) - measurements "
               f"will not persist across restarts", flush=True)
+    return True
+
+
+def _auto_cache_floor(key, pool_bytes):
+    """Record a LOWER BOUND from a run whose peak was truncated by the card.
+
+    Same ratchet as _auto_cache_store - it only ever raises - but named
+    separately at the call site so it is obvious that the number is known to
+    understate the real need. Without this a ceiling-bound shot contributes
+    nothing at all, which is how the chained shots deadlocked: their payload key
+    stayed empty, the fallback reserve was too small for them, and every attempt
+    to measure was thrown away for being too small.
+    """
+    return _auto_cache_store(key, pool_bytes)
 
 
 _auto_payload = {"sig": ""}
@@ -859,16 +893,42 @@ def _install_auto_reserve(patcher, model_name):
                             "(%.1f GB) resident out of %.1f GB free"
                             % (_was / 2**30, reserve / 2**30, _w / 2**30,
                                _free / 2**30))
-                    if _was > reserve * 1.35:
-                        print("[H3AutoReserve] WARNING: this shot asked for "
-                              "%.1f GB of activation pool and only %.1f GB is "
-                              "available after the %.1f GB of weights. That "
-                              "is not a slow render - it usually dies inside "
-                              "a CUDA kernel and takes the server with it. "
-                              "Lower frames_per_shot or resolution, or load a "
-                              "smaller quantisation of the DiT."
-                              % (_was / 2**30, reserve / 2**30, _w / 2**30),
-                              flush=True)
+                    # Only shout when the pre-clamp figure came from EVIDENCE.
+                    # On a first run at an unseen shape there is no
+                    # measurement, and `_was` is the placeholder from the
+                    # "%.0f%% of free" branch - a fraction of whatever happens
+                    # to be free, not an estimate of this shot's need. It is
+                    # therefore always far above the clamp, so this warning
+                    # fired on every new shape and predicted a server-killing
+                    # crash for renders that were fine.
+                    #
+                    # Field log 2026-08-15, 5090, two different shapes:
+                    #   cells=6384960  "asked for 26.5 GB"
+                    #   cells=6993216  "asked for 26.5 GB"   <- 10% more pixels
+                    # Identical, because both are 88% of the same 30.1 GB free.
+                    # Both clamped, both rendered clean, and both then MEASURED
+                    # 11.4 GB - less than half the figure being warned about.
+                    # A warning that cries wolf on every new resolution teaches
+                    # people to cancel jobs that would have worked.
+                    if _was > reserve * 1.35 and _known_need:
+                        print("[H3AutoReserve] WARNING: this shape previously "
+                              "MEASURED a %.1f GB activation pool and only "
+                              "%.1f GB is available after the %.1f GB of "
+                              "weights. That is not a slow render - it usually "
+                              "dies inside a CUDA kernel and takes the server "
+                              "with it. Lower frames_per_shot or resolution, or "
+                              "load a smaller quantisation of the DiT."
+                              % (_known_need / 2**30, reserve / 2**30,
+                                 _w / 2**30), flush=True)
+                    elif _was > reserve * 1.35:
+                        print("[H3AutoReserve] first run at this shape - the "
+                              "%.1f GB figure is a placeholder (%.0f%% of "
+                              "free), not a measurement, and has been clamped "
+                              "to %.1f GB so the %.1f GB of weights stay "
+                              "resident. The real pool gets measured during "
+                              "this shot and used from the next one on."
+                              % (_was / 2**30, _AUTO_FRACTION * 100,
+                                 reserve / 2**30, _w / 2**30), flush=True)
                 if measured and reserve < measured:
                     how += (" [tight: below the measured pool %.1f GB]"
                             % (measured / 2**30))
@@ -970,12 +1030,51 @@ def _auto_measure_end(before, patcher=None, steps=None):
         pool = peak - before["res"] - loaded
         _frac = (loaded / float(full)) if full else 1.0
         _partial = bool(full) and 0.02 < _frac < 0.98
-        if _partial:
-            print(f"[H3AutoReserve] measurement discarded: only "
+        # 2.2.5: a blanket discard on every partial load DEADLOCKS the chained
+        # shots. Field log 2026-08-14, 5090, Q8_0 at 736x1280x243: shot 1 loads
+        # completely and measures fine, shots 2-4 carry the context pin plus the
+        # self-anchor audio ref, cannot fit the 20.8 GB DiT beside them, load
+        # partially - and are then discarded. Their payload key therefore never
+        # receives a single measurement, so it keeps the fallback reserve, so it
+        # keeps loading partially. Learning requires a full load; a full load
+        # requires the knowledge the rule refuses to record. Every shot after the
+        # first ran 57 s/it against shot 1's 39.
+        #
+        # The discard is only actually justified when the peak was CEILING-BOUND
+        # - i.e. the run pressed against the card and the pool got truncated. If
+        # peak sits well below total VRAM the activations completed normally and
+        # the pool figure is honest, even though some weights were streaming. So
+        # gate the discard on proximity to the ceiling instead of on residency
+        # alone, and when we do discard, still keep the observation as a FLOOR so
+        # the estimate can only ratchet toward the truth rather than never move.
+        _total = 0
+        try:
+            import torch as _t
+            _total = int(_t.cuda.get_device_properties(0).total_memory)
+        except Exception:
+            _total = 0
+        _ceiling_bound = bool(_total) and peak > _total * 0.94
+        if _partial and _ceiling_bound:
+            _floor = _auto_cache_floor(key, pool)
+            print(f"[H3AutoReserve] measurement capped: only "
                   f"{loaded/2**30:.1f} of {full/2**30:.1f} GB of weights were "
-                  f"resident, so this peak reflects what fit on the card rather "
-                  f"than what the shot needed. Cached reserve unchanged.",
-                  flush=True)
+                  f"resident AND peak {peak/2**30:.1f} GB pressed the "
+                  f"{_total/2**30:.1f} GB card, so the pool was truncated. "
+                  f"Keeping {pool/2**30:.1f} GB as a floor"
+                  f"{' (raised)' if _floor else ''}; not treating it as the "
+                  f"full need.", flush=True)
+        elif _partial:
+            # streaming weights, but the pool itself was never squeezed
+            if pool > 512 * 1024**2:
+                _auto_cache_store(key, pool)
+                _auto_session.pop(key, None)
+                print(f"[H3AutoReserve] measured pool {pool/2**30:.1f} GB with "
+                      f"weights streaming ({loaded/2**30:.1f} of "
+                      f"{full/2**30:.1f} GB resident). Peak {peak/2**30:.1f} GB "
+                      f"stayed clear of the {_total/2**30:.1f} GB ceiling, so "
+                      f"the activation figure is sound - recording it. This is "
+                      f"the sample chained shots could never contribute before.",
+                      flush=True)
         elif pool > 512 * 1024**2:          # ignore no-op runs
             _auto_cache_store(key, pool)
             _auto_session.pop(key, None)     # re-pin from measured
@@ -1663,15 +1762,22 @@ class H3MultishotSampler:
                            "takes priority. Use with a ref2va checkpoint."}),
             "output_scale": ("FLOAT", {
                 "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
-                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
-                           "This is a lanczos resize of the finished frames, "
-                           "not a second diffusion pass: it adds resolution, "
-                           "not detail. It is applied per shot, so peak memory "
-                           "is one shot rather than the whole chain, and it "
-                           "works with EVERY continuity mode including "
-                           "context_pin, because it happens after sampling. "
-                           "The memory bank still stores base-resolution "
-                           "clips, so conditioning and VRAM are unchanged."}),
+                "tooltip": "FINAL size multiplier, applied after decode. "
+                           "No upscale model: a lanczos resize, 1.0 is off. "
+                           "WITH a model: the model runs at its OWN fixed "
+                           "factor (usually 4x) and this brings the result to "
+                           "source x this value, so 2.0 on a 4x model gives "
+                           "2x, not 8x. "
+                           "CAREFUL - 1.0 does NOT mean off once a model is "
+                           "wired; it means do-not-correct, so you get the "
+                           "full 4x. At 1344x768 that is 5376x3072: 94 MB a "
+                           "frame, 22 GB a shot, and every shot stays in "
+                           "system RAM until the master is joined. The console "
+                           "prints the projected size when the model loads - "
+                           "read it. "
+                           "Adds resolution, not detail. Works with every "
+                           "continuity mode; the bank still stores "
+                           "base-resolution clips."}),
             "upscale_model": ("UPSCALE_MODEL", {
                 "tooltip": "Optional. Wire ComfyUI's Load Upscale Model here "
                            "(ESRGAN and friends) to synthesise detail instead "
@@ -2285,7 +2391,36 @@ def _cc_apply(imgs, house_mu, house_cov, strength=1.0, block=8):
     return out
 
 
-def _subject_defs(n_image, n_audio, n_video, speaker="the person"):
+def _parse_ref_groups(spec, n_image):
+    """"3,3" -> [1,1,1,2,2,2]: which subject each reference picture belongs to.
+
+    Empty/invalid returns None, meaning "every picture is <Subject 1>" - the
+    behaviour every release before 2.2.4 had. Counts that do not add up to
+    n_image are corrected rather than rejected: a trailing shortfall joins the
+    last subject, an overshoot is truncated. A user who mutes a reference image
+    should not get a hard error out of a text field.
+    """
+    if not spec or not str(spec).strip() or n_image <= 0:
+        return None
+    try:
+        counts = [int(x) for x in re.split(r"[,\s]+", str(spec).strip()) if x]
+    except ValueError:
+        print("[H3] reference_subjects %r is not a comma list of counts - "
+              "treating every reference as one subject." % spec, flush=True)
+        return None
+    counts = [c for c in counts if c > 0]
+    if len(counts) < 2:
+        return None
+    out = []
+    for si, c in enumerate(counts, 1):
+        out.extend([si] * c)
+    if len(out) < n_image:
+        out.extend([out[-1]] * (n_image - len(out)))
+    return out[:n_image]
+
+
+def _subject_defs(n_image, n_audio, n_video, speaker="the person",
+                  image_subjects=None):
     """Official H3 ref2va subject_definitions + retention_analysis block.
 
     The tokenizer emits reference items as bare "<Picture k>: ",
@@ -2296,14 +2431,33 @@ def _subject_defs(n_image, n_audio, n_video, speaker="the person"):
     drift between chained shots. Syntax follows the MiniMax-H3 model card's
     Ref2VA case; retention keywords are fully_preserved / partially_copy /
     reference.
+
+    image_subjects (2.2.4) is an optional list, one entry per reference
+    picture, giving the subject number that picture belongs to. Until 2.2.4
+    every picture was declared a photograph of <Subject 1> unconditionally, so
+    references for two different people told the model all of them showed the
+    same individual and it rendered the average - reported on Civitai as
+    "the video doesn't contain anything that resembles the reference people".
+    None keeps the old single-subject behaviour exactly.
     """
     import os as _os
     if _os.environ.get("H3_NO_SUBJECT_DEFS"):   # A/B switch for testing
         return ""
     if not (n_image or n_audio or n_video):
         return ""
-    d = ["subject_definitions:",
-         "<Subject 1> is %s speaking in this scene." % speaker]
+    subs = list(image_subjects or [])
+    n_sub = max(subs) if subs else 1
+    if n_sub <= 1:
+        d = ["subject_definitions:",
+             "<Subject 1> is %s speaking in this scene." % speaker]
+    else:
+        # Only <Subject 1> is described as speaking; H3's voice conditioning is
+        # single-speaker and naming several speakers competes for the audio lane.
+        d = ["subject_definitions:",
+             "<Subject 1> is %s speaking in this scene." % speaker]
+        for s in range(2, n_sub + 1):
+            d.append("<Subject %d> is a different individual who also appears "
+                     "in this scene." % s)
     # Do NOT enumerate accessories here. This block is unconditional text on a
     # BasicGuider path - cfg 1.0, no negative branch - so anything named is
     # ADDED and can never be subtracted by the user's prompt. Naming "glasses"
@@ -2317,8 +2471,14 @@ def _subject_defs(n_image, n_audio, n_video, speaker="the person"):
          "retains the same face, skin and hair, and "
          "stays in the same room under the same lighting and colour "
          "temperature."]
+    for s in range(2, n_sub + 1):
+        r.append("<Subject %d> (appears in [Shot 1]): fully_preserved - "
+                 "<Subject %d> retains their own distinct face, skin and hair "
+                 "and is never blended with <Subject 1>." % (s, s))
     for k in range(1, n_image + 1):
-        d.append("<Picture %d> is a reference photograph of <Subject 1>." % k)
+        s = subs[k - 1] if k <= len(subs) else 1
+        d.append("<Picture %d> is a reference photograph of <Subject %d>."
+                 % (k, s))
     for k in range(1, n_video + 1):
         d.append("<Video %d> is a clip from an earlier moment of this same "
                  "continuous scene, showing <Subject 1> in the same place "
@@ -2818,15 +2978,22 @@ class H3MultishotMemorySampler:
                            "console."}),
             "output_scale": ("FLOAT", {
                 "default": 1.0, "min": 1.0, "max": 4.0, "step": 0.05,
-                "tooltip": "Enlarge each shot AFTER it is decoded. 1.0 = off. "
-                           "This is a lanczos resize of the finished frames, "
-                           "not a second diffusion pass: it adds resolution, "
-                           "not detail. It is applied per shot, so peak memory "
-                           "is one shot rather than the whole chain, and it "
-                           "works with EVERY continuity mode including "
-                           "context_pin, because it happens after sampling. "
-                           "The memory bank still stores base-resolution "
-                           "clips, so conditioning and VRAM are unchanged."}),
+                "tooltip": "FINAL size multiplier, applied after decode. "
+                           "No upscale model: a lanczos resize, 1.0 is off. "
+                           "WITH a model: the model runs at its OWN fixed "
+                           "factor (usually 4x) and this brings the result to "
+                           "source x this value, so 2.0 on a 4x model gives "
+                           "2x, not 8x. "
+                           "CAREFUL - 1.0 does NOT mean off once a model is "
+                           "wired; it means do-not-correct, so you get the "
+                           "full 4x. At 1344x768 that is 5376x3072: 94 MB a "
+                           "frame, 22 GB a shot, and every shot stays in "
+                           "system RAM until the master is joined. The console "
+                           "prints the projected size when the model loads - "
+                           "read it. "
+                           "Adds resolution, not detail. Works with every "
+                           "continuity mode; the bank still stores "
+                           "base-resolution clips."}),
             "sigmas": ("SIGMAS", {
                 "tooltip": "Optional custom sigma schedule, replacing "
                            "sampler/scheduler + steps entirely. Some turbo "
@@ -2850,11 +3017,15 @@ class H3MultishotMemorySampler:
                            "write per shot."}),
             "upscale_model_name": (["(none)"] + _up_model_list(), {
                 "default": "(none)",
-                "tooltip": "Pick an upscale model by name instead of wiring "
-                           "one - same thing the upscale_model input does, "
-                           "without the loader node. Synthesises detail rather "
-                           "than resizing, per shot, at the model's own factor; "
-                           "set output_scale as well to land on an exact size. "
+                "tooltip": "Pick an upscale model by name instead of wiring a "
+                           "loader node. Synthesises detail rather than "
+                           "resizing, per shot, at the model's OWN fixed "
+                           "factor - usually 4x. "
+                           "Set output_scale to the size you actually want; "
+                           "leaving it at 1.0 lets the raw 4x through, which "
+                           "is rarely what you meant. The console prints the "
+                           "projected frame size and RAM cost when the model "
+                           "loads, before any sampling. "
                            "Reads models/upscale_models/, the same folder "
                            "ComfyUI's own Load Upscale Model reads."}),
             "master_normalize": (["off", "luma", "luma+contrast"], {
@@ -2930,6 +3101,44 @@ class H3MultishotMemorySampler:
                            "composition. One seed, one canvas. A scalar "
                            "rescale moves no structure, so unlike a pixel "
                            "correction it cannot blur detail."}),
+            # NEW IN 2.2.4 - appended at the very END of the optional block on
+            # purpose. widgets_values is a POSITIONAL array, so inserting a
+            # widget anywhere but the end silently shifts every value after it
+            # in workflows people have already saved. That is what produced the
+            # per-shot sharpening incident; never insert mid-list.
+            "reference_subjects": ("STRING", {
+                "default": "",
+                "tooltip": "How your reference pictures group into PEOPLE. "
+                           "Empty (default) = every reference picture is "
+                           "declared a photograph of the same one person. That "
+                           "is correct for a single character and WRONG for "
+                           "several - the model is told they are all the same "
+                           "individual and renders the average. Comma counts in "
+                           "picture order: '3,3' means pictures 1-3 are person "
+                           "A and 4-6 are person B; '2,2,2' for three people. "
+                           "Only <Subject 1> is described as speaking, because "
+                           "H3's voice conditioning is single-speaker."}),
+            "reference_video": ("IMAGE", {
+                "tooltip": "NEW IN 2.2.4. Frames of an EXISTING clip, handed to "
+                           "the model as a video reference alongside the "
+                           "picture references. Read what this does before "
+                           "wiring it: H3 is told a video reference is 'an "
+                           "earlier moment of this same continuous scene' and "
+                           "to keep its framing, camera distance, room contents "
+                           "and colour temperature. It is SCENE and APPEARANCE "
+                           "conditioning. It is NOT motion transfer - there is "
+                           "no pose, depth or optical-flow path in H3, so it "
+                           "will not make your subject copy the movement in the "
+                           "clip. Feed it through H3ReferenceVideo, which trims "
+                           "and subsamples to the 2 fps the model actually "
+                           "reads; a raw 25-second clip is ~50 reference frames "
+                           "riding every sampling step."}),
+            "reference_video_audio": ("AUDIO", {
+                "tooltip": "Optional soundtrack for reference_video. H3 pairs "
+                           "video references with an audio reference, so if you "
+                           "leave this empty silence is generated to match. "
+                           "Supply the clip's real audio when you want its "
+                           "voice timbre referenced too."}),
         }}
 
     RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
@@ -2991,7 +3200,9 @@ class H3MultishotMemorySampler:
             preview_first_shot=False,
             save_every_shot=False, sigmas=None, output_scale=1.0,
             upscale_model_name="(none)",
-            master_normalize="luma+contrast", pin_frames="22", pin_noise=0.0, pin_renorm=False):
+            master_normalize="luma+contrast", pin_frames="22", pin_noise=0.0,
+            pin_renorm=False, reference_subjects="",
+            reference_video=None, reference_video_audio=None):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -3182,6 +3393,36 @@ class H3MultishotMemorySampler:
                     "the first shot has rendered." % (upscale_model_name, _e))
             print("[H3Memory] upscale model: %s (loaded and verified)"
                   % upscale_model_name, flush=True)
+            # Predict the cost NOW, not after the first shot has been sampled
+            # and upscaled. Frames accumulate on the host until the master is
+            # joined, so the total is per-shot x shots - and output_scale left
+            # at 1.0 lets the model's full factor through, which is how a run
+            # ended up projecting 134.6 GB against 93.6 GB of RAM.
+            try:
+                import psutil as _ps
+                _ram = _ps.virtual_memory().total / 2**30
+            except Exception:
+                _ram = 0.0
+            _f = float(output_scale) if output_scale and abs(
+                float(output_scale) - 1.0) > 1e-6 else _up_model_factor(
+                    upscale_model)
+            _ow, _oh = int(round(width * _f)), int(round(height * _f))
+            _per = _ow * _oh * 3 * 2 / 2**30          # fp16 on the host
+            _tot = _per * frames_per_shot * max(1, len(shots))
+            print("[H3Memory] upscale will produce %dx%d (%.1fx): %.0f MB per "
+                  "frame, %.1f GB per shot, %.1f GB for %d shot(s)%s"
+                  % (_ow, _oh, _f, _per * 1024, _per * frames_per_shot, _tot,
+                     max(1, len(shots)),
+                     (" against %.1f GB of RAM" % _ram) if _ram else ""),
+                  flush=True)
+            if _ram and _tot > _ram * 0.8:
+                print("[H3Memory] WARNING: that will not fit. Frames are held "
+                      "in system RAM until the master is joined, so this dies "
+                      "at the join after every shot has been paid for. Set "
+                      "output_scale to %.2f or lower, or turn the upscaler off."
+                      % max(1.0, (_ram * 0.7 / (frames_per_shot * max(1, len(shots))
+                                                * width * height * 3 * 2 / 2**30))
+                            ** 0.5), flush=True)
         sr = None
         _cg_ref = None
         _CG_WIN = 24
@@ -3296,8 +3537,39 @@ class H3MultishotMemorySampler:
             # bank slots -> video_audio references, built the way core does.
             # first_frame mode runs on an fl2va checkpoint, which has no
             # reference rows - the hand-off frame carries continuity.
+            #
+            # 2.2.4: a user-supplied reference_video is prepended as just
+            # another (frames, audio) pair, so it travels this exact proven
+            # path instead of a parallel one. H3 pairs every video reference
+            # with an audio reference, so silence is synthesised when the user
+            # has none - stereo, because the ref audio encoder wants two
+            # channels, and any rate is fine since _encode_ref_audio resamples.
+            _extra_clips = []
+            if reference_video is not None and int(reference_video.shape[0]):
+                _rv_a = reference_video_audio
+                _rv_n = int(reference_video.shape[0])
+                if _rv_a is None:
+                    import torch as _t
+                    _sr = 32000
+                    _dur = _rv_n / float(mmh3.FPS)
+                    _rv_a = {"waveform": _t.zeros(1, 2, max(1, int(_dur * _sr))),
+                             "sample_rate": _sr}
+                    if si == 1:
+                        print("[H3Memory] reference_video: %d frame(s), no "
+                              "audio supplied - pairing with silence" % _rv_n,
+                              flush=True)
+                elif si == 1:
+                    print("[H3Memory] reference_video: %d frame(s) + audio"
+                          % _rv_n, flush=True)
+                if si == 1 and _rv_n > 64:
+                    print("[H3Memory] reference_video is %d frames; it is "
+                          "subsampled to 2 fps but that is still a lot of "
+                          "reference tokens on EVERY step. Run it through "
+                          "H3ReferenceVideo to trim." % _rv_n, flush=True)
+                _extra_clips.append((reference_video, _rv_a))
             for clip_frames, clip_audio in (
-                    [] if continuity == "first_frame" else bank.frames()):
+                    _extra_clips
+                    + ([] if continuity == "first_frame" else bank.frames())):
                 vh, vw = int(clip_frames.shape[1]), int(clip_frames.shape[2])
                 cw, ch = mmh3.adapt_canvas(vw, vh)
                 if vw * vh < cw * ch:
@@ -3496,10 +3768,13 @@ class H3MultishotMemorySampler:
             if kf_vision:
                 tokens = clip.tokenize(prompt, images=kf_vision)
             elif ref_items:
+                _n_img = sum(1 for i in ref_items if i["type"] == "image")
+                _groups = _parse_ref_groups(reference_subjects, _n_img)
                 _sd = _subject_defs(
-                    sum(1 for i in ref_items if i["type"] == "image"),
+                    _n_img,
                     sum(1 for i in ref_items if i["type"] == "audio"),
-                    sum(1 for i in ref_items if i["type"] == "video"))
+                    sum(1 for i in ref_items if i["type"] == "video"),
+                    image_subjects=_groups)
                 if _sd:
                     if si == 1:
                         print("[H3Memory] subject_definitions added for %d "
@@ -3507,6 +3782,19 @@ class H3MultishotMemorySampler:
                               "what the refs ARE and to preserve identity, "
                               "room, colour and voice timbre"
                               % len(ref_items), flush=True)
+                        if _groups:
+                            print("[H3Memory] reference_subjects %r -> %d "
+                                  "distinct subject(s) across %d picture(s); "
+                                  "each is declared its own person instead of "
+                                  "all being <Subject 1>"
+                                  % (reference_subjects, max(_groups), _n_img),
+                                  flush=True)
+                        elif _n_img > 1:
+                            print("[H3Memory] %d reference pictures are all "
+                                  "declared <Subject 1> (one person). If they "
+                                  "show DIFFERENT people, set reference_"
+                                  "subjects (e.g. '3,3') or they will blend."
+                                  % _n_img, flush=True)
                     prompt = prompt.rstrip() + "\n" + _sd
                 tokens = clip.tokenize(prompt, minimax_ref_items=ref_items)
             else:

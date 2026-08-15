@@ -61,11 +61,11 @@ def _unload(base_url, model_name, timeout=10.0):
         return
     before = _resident(root, timeout)
     if before is None:
-        print("[Rift] writer unload: %s has no native API (hosted endpoint?) "
+        print("[H3 Multishot] writer unload: %s has no native API (hosted endpoint?) "
               "- nothing on this card to free." % root, flush=True)
         return
     if not before:
-        print("[Rift] writer unload: nothing resident.", flush=True)
+        print("[H3 Multishot] writer unload: nothing resident.", flush=True)
         return
     wanted = (model_name or "").strip()
     targets = [wanted] if wanted else [n for n, _ in before]
@@ -79,7 +79,7 @@ def _unload(base_url, model_name, timeout=10.0):
             with urllib.request.urlopen(req, timeout=timeout) as r:
                 r.read()
         except Exception as e:
-            print("[Rift] writer unload: %s did not unload (%s) - continuing."
+            print("[H3 Multishot] writer unload: %s did not unload (%s) - continuing."
                   % (name, e), flush=True)
     # the unload call returns BEFORE the eviction completes; reading /api/ps
     # immediately reports the model still resident and makes a success look
@@ -91,7 +91,7 @@ def _unload(base_url, model_name, timeout=10.0):
         after = _resident(root, timeout) or []
     freed = (sum(v for _, v in before) - sum(v for _, v in after)) / 1e9
     still = ", ".join(n for n, _ in after)
-    print("[Rift] writer unload: freed %.1f GB from %s%s"
+    print("[H3 Multishot] writer unload: freed %.1f GB from %s%s"
           % (freed, root, ("; still resident: " + still) if still
              else "; card is clear"), flush=True)
 
@@ -136,13 +136,13 @@ def _patch(cls, name):
                             (kw.get("model_name_custom") or "").strip()
                             or kw.get("model_name", ""))
                 except Exception as e:                   # never break a render
-                    print("[Rift] writer unload skipped: %s" % e, flush=True)
+                    print("[H3 Multishot] writer unload skipped: %s" % e, flush=True)
 
     cls.INPUT_TYPES = INPUT_TYPES
     setattr(cls, fn_name, wrapped)
     cls._rift_unload_patched = True
     _PATCHED.add(name)
-    print("[Rift] %s: added '%s' switch (frees the writer's VRAM before the "
+    print("[H3 Multishot] %s: added '%s' switch (frees the writer's VRAM before the "
           "video model loads)." % (name, WIDGET), flush=True)
     return True
 
@@ -164,7 +164,7 @@ def _wait_and_patch(budget_s=90.0):
                 try:
                     _patch(cls, t)
                 except Exception as e:
-                    logging.warning("[Rift] could not patch %s: %s", t, e)
+                    logging.warning("[H3 Multishot] could not patch %s: %s", t, e)
                     _PATCHED.add(t)
         time.sleep(1.0)
 

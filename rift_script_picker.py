@@ -114,7 +114,7 @@ class RiftScriptPicker:
     RETURN_TYPES = ("STRING", "STRING", "STRING",)
     RETURN_NAMES = ("prompts_json", "path", "speakers",)
     FUNCTION = "load"
-    CATEGORY = "Rift"
+    CATEGORY = "H3/script"
 
     @classmethod
     def IS_CHANGED(cls, script):
@@ -150,14 +150,14 @@ class RiftScriptPicker:
         speakers = derive_speakers(data, arr)
         set_last_speakers(speakers)
         set_last_voice_refs(data.get("voice_refs") or {})
-        print(f"[Rift] ScriptPicker: {script} ({len(arr)} shots)"
+        print(f"[H3 Multishot] ScriptPicker: {script} ({len(arr)} shots)"
               + (f", speakers: {' '.join(speakers)}" if speakers else ", no speaker tags")
               + ".", flush=True)
         return (text, str(p), " ".join(speakers),)
 
 
 NODE_CLASS_MAPPINGS = {"RiftScriptPicker": RiftScriptPicker}
-NODE_DISPLAY_NAME_MAPPINGS = {"RiftScriptPicker": "Rift Script Picker (JSON dropdown)"}
+NODE_DISPLAY_NAME_MAPPINGS = {"RiftScriptPicker": "Script Picker (JSON dropdown)"}
 
 # deprecated alias - saved workflows made before the rename still
 # reference the old key; keep it resolving so they open.

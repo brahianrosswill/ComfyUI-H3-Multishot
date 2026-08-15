@@ -755,3 +755,99 @@ NODE_CLASS_MAPPINGS["H3AnySwitch"] = H3AnySwitch
 NODE_CLASS_MAPPINGS["H3StudioSwitches"] = H3StudioSwitches
 NODE_DISPLAY_NAME_MAPPINGS["H3AnySwitch"] = "H3 Any Switch (lazy A/B)"
 NODE_DISPLAY_NAME_MAPPINGS["H3StudioSwitches"] = "H3 Studio Switches (feature toggles)"
+
+
+class H3ReferenceVideo:
+    """Trim a clip down to something sane to hand the sampler as a video reference.
+
+    Read this before using it. H3 tells the model a video reference is "a clip
+    from an earlier moment of this same continuous scene" and asks it to keep
+    the framing, camera distance, room contents and colour temperature. That is
+    SCENE and APPEARANCE conditioning. It is NOT motion transfer - H3 has no
+    pose, depth or optical-flow path, so the subject will not copy the movement
+    in your clip.
+
+    What this node is for: reference frames are subsampled to 2 fps and then
+    ride through every sampling step, so their cost is permanent. A 25-second
+    clip is roughly 50 reference frames on every step. Trim to a few
+    representative seconds and the reference does the same job for a fraction
+    of the tokens.
+    """
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {"required": {
+            "frames": ("IMAGE", {"tooltip": "Frames of the clip to reference."}),
+            "start_seconds": ("FLOAT", {
+                "default": 0.0, "min": 0.0, "max": 600.0, "step": 0.5,
+                "tooltip": "Where the reference window starts."}),
+            "seconds": ("FLOAT", {
+                "default": 3.0, "min": 0.5, "max": 20.0, "step": 0.5,
+                "tooltip": "How much of the clip to keep. 2-4s of a "
+                           "representative moment carries the room and the "
+                           "look; more mostly buys token cost."}),
+            "source_fps": ("FLOAT", {
+                "default": 24.0, "min": 1.0, "max": 120.0, "step": 1.0,
+                "tooltip": "Frame rate of the incoming clip, used to convert "
+                           "seconds to frames. Only affects the trim."}),
+        }, "optional": {
+            "audio": ("AUDIO", {
+                "tooltip": "The clip's soundtrack. Trimmed to the same window. "
+                           "Leave empty and the sampler pairs the video with "
+                           "silence, which is fine when you only want the look."}),
+        }}
+
+    RETURN_TYPES = ("IMAGE", "AUDIO", "STRING")
+    RETURN_NAMES = ("ref_frames", "ref_audio", "info")
+    OUTPUT_TOOLTIPS = (
+        "Wire to the sampler's reference_video.",
+        "Wire to reference_video_audio (or leave it).",
+        "What was kept and what it will cost.")
+    FUNCTION = "trim"
+    CATEGORY = "video/minimax"
+
+    def trim(self, frames, start_seconds, seconds, source_fps, audio=None):
+        n = int(frames.shape[0])
+        fps = max(1e-6, float(source_fps))
+        a = max(0, min(n - 1, int(round(start_seconds * fps))))
+        b = max(a + 1, min(n, a + int(round(seconds * fps))))
+        out = frames[a:b]
+        kept = int(out.shape[0])
+
+        out_audio = None
+        if audio is not None and isinstance(audio, dict) and "waveform" in audio:
+            try:
+                sr = int(audio["sample_rate"])
+                w = audio["waveform"]
+                s0 = int(round(a / fps * sr))
+                s1 = int(round(b / fps * sr))
+                s1 = max(s0 + 1, min(int(w.shape[-1]), s1))
+                w = w[..., s0:s1]
+                if w.shape[-2] == 1:            # ref audio wants stereo
+                    w = w.repeat_interleave(2, dim=-2)
+                out_audio = {"waveform": w, "sample_rate": sr}
+            except Exception as e:
+                print("[H3ReferenceVideo] could not trim audio (%s); passing "
+                      "it through untrimmed" % e, flush=True)
+                out_audio = audio
+        if out_audio is None:
+            import torch
+            sr = 32000
+            out_audio = {"waveform": torch.zeros(1, 2, max(1, int(kept / fps * sr))),
+                         "sample_rate": sr}
+
+        # the sampler keeps every (FPS//2)-th frame; FPS is 24 in H3
+        est = max(1, kept // 12)
+        info = ("kept %d frame(s) (%.1fs-%.1fs of %.1fs) -> about %d reference "
+                "frame(s) after the sampler's 2 fps subsample. Scene/appearance "
+                "conditioning only; this does not transfer motion."
+                % (kept, a / fps, b / fps, n / fps, est))
+        print("[H3ReferenceVideo] " + info, flush=True)
+        if est > 12:
+            print("[H3ReferenceVideo] that is a lot of reference frames to "
+                  "carry on every step - consider a shorter window.", flush=True)
+        return (out, out_audio, info)
+
+
+NODE_CLASS_MAPPINGS["H3ReferenceVideo"] = H3ReferenceVideo
+NODE_DISPLAY_NAME_MAPPINGS["H3ReferenceVideo"] = "H3 Reference Video (trim for ref2va)"

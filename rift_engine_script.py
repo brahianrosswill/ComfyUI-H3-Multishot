@@ -78,7 +78,7 @@ class RiftEngineScript:
     RETURN_TYPES = ("STRING", "STRING", "INT")
     RETURN_NAMES = ("h3_script", "ltx_prompt", "shot_count")
     FUNCTION = "split"
-    CATEGORY = "Rift"
+    CATEGORY = "H3/script"
 
     def split(self, script, ltx_shot_label="Then, without moving the camera,"):
         blocks = _blocks(script)
@@ -127,7 +127,7 @@ class RiftEngineScript:
             label = ltx_shot_label.strip()
             ltx = (" " + label + " ").join(blocks) if label else " ".join(blocks)
 
-        print("[Rift] EngineScript: %d shot(s); scene block %s; "
+        print("[H3 Multishot] EngineScript: %d shot(s); scene block %s; "
               "H3 %d chars, LTX %d chars"
               % (len(blocks),
                  "%d chars, stated once for LTX" % len(scene) if scene
@@ -138,4 +138,4 @@ class RiftEngineScript:
 
 NODE_CLASS_MAPPINGS = {"RiftEngineScript": RiftEngineScript}
 NODE_DISPLAY_NAME_MAPPINGS = {
-    "RiftEngineScript": "Rift Engine Script (H3 + LTX-2.5 from one source)"}
+    "RiftEngineScript": "Script for Two Engines (H3 + LTX-2.5)"}
