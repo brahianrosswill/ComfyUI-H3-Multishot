@@ -488,7 +488,7 @@ A booster whose pack is missing prints an install link and passes the model
 through unchanged.
 
 
-## Memory systems (new in 2.5.1)
+## Memory systems (new in 2.5.2)
 
 ### Driver headroom (automatic)
 

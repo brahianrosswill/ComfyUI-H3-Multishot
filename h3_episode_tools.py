@@ -728,9 +728,50 @@ class H3StudioSwitches:
         ("remote_encoder", False),
     ]
 
+    TIPS = {
+        "two_pass_upscale":
+            "Two-pass rendering: sample small, finish at full size. Acts only "
+            "in workflows with the two-pass lane wired - the main Seamless "
+            "Chain workflow does not use it. If dual_clock_sampler is also "
+            "on, that one wins and this is suppressed.",
+        "sol_attn":
+            "Memory-efficient attention: lowers peak VRAM on large canvases, "
+            "slightly slower. Two steps to use: install ComfyUI-sol-attn and "
+            "un-bypass the attention patch node (Ctrl+B), then turn this on.",
+        "chunk_ffn":
+            "Runs the model's feed-forward layers in chunks to lower peak "
+            "VRAM, slightly slower. Same two steps: install ComfyUI-sol-attn, "
+            "un-bypass the patch node (Ctrl+B), then turn this on.",
+        "spectrum":
+            "Routes the Spectrum lane in workflows that wire it. In the main "
+            "workflow use the SPEED BOOSTERS node instead: about 29% faster, "
+            "but it can distort people - compare on your own scene first.",
+        "block_cache":
+            "Skips model blocks whose input barely changed: about 11% faster "
+            "with output indistinguishable in side-by-side testing. Needs "
+            "comfyui-minimax-h3-blockcache-T8 installed and its patch node "
+            "un-bypassed (Ctrl+B). The SPEED BOOSTERS node offers the same "
+            "cache with no un-bypass step.",
+        "dual_clock_sampler":
+            "Experimental: advances video and audio on separate clocks. Needs "
+            "a full sigma schedule (simple or beta scheduler), and suppresses "
+            "two_pass_upscale while on.",
+        "hybrid_cond":
+            "Experimental conditioning mix, not wired in the shipped "
+            "workflows. Leave off unless a workflow's own notes say "
+            "otherwise.",
+        "remote_encoder":
+            "Encode prompts on a second ComfyUI PC so this card never loads "
+            "the 15+ GB text encoder. Fill in the H3 Remote Text Encoder "
+            "node first (address + encoder file) - the how-to note beside it "
+            "walks through setup. OFF = normal local encoding.",
+    }
+
     @classmethod
     def INPUT_TYPES(cls):
-        return {"required": {n: ("BOOLEAN", {"default": d}) for n, d in cls.FLAGS}}
+        return {"required": {
+            n: ("BOOLEAN", {"default": d, "tooltip": cls.TIPS.get(n, "")})
+            for n, d in cls.FLAGS}}
 
     RETURN_TYPES = tuple("BOOLEAN" for _ in FLAGS)
     RETURN_NAMES = tuple(n for n, _ in FLAGS)

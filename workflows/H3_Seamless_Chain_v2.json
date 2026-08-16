@@ -1765,10 +1765,10 @@
       "mode": 0,
       "inputs": [],
       "outputs": [],
-      "title": "VRAM / SPEED  -  read before un-bypassing",
+      "title": "VRAM / SPEED - check these switches",
       "properties": {},
       "widgets_values": [
-        "VRAM / SPEED\n\nLeave everything here OFF - that's the tested setup.\n\nWant faster renders? The SPEED BOOSTERS node next to the sampler has three switches (Spectrum ~29% faster, TeaCache ~14%, block cache ~11%). Each needs its pack installed - flip a switch and the console tells you where to get it.\n\nBoosters change the image slightly, like changing the seed: test on your own scene.\n\nRenders slow or crashing? Lower the size or seconds-per-shot in MASTER CONTROLS first. That fixes 9 out of 10 memory problems."
+        "VRAM / SPEED - check these switches\n\nHover any switch on this panel or on the SPEED BOOSTERS node for what it does and what it costs.\n\nThis panel ships all OFF - that's the tested setup. The one worth knowing: remote_encoder moves the text encoder's 15+ GB to a second PC (see the REMOTE ENCODER note).\n\nFaster renders? The SPEED BOOSTERS node next to the sampler: block cache ships ON (~11% faster, no visible change). Spectrum (~29%), TeaCache (~14-21%) and EasyCache (~21%) are faster still but can distort people - test on your own scene first, and never stack Spectrum with TeaCache.\n\nRenders slow or crashing? Lower the size or seconds-per-shot in MASTER CONTROLS first. That fixes 9 out of 10 memory problems."
       ],
       "color": "#432",
       "bgcolor": "#653"
@@ -2238,7 +2238,7 @@
       "title": "joeygambino Workflow Pack v.2.2.6",
       "properties": {},
       "widgets_values": [
-        "## MiniMax-H3 Seamless Chain v2.5.1\n\n**Updates & guides**\n- [Civitai page + articles](https://civitai.com/models/2833322)\n- [HuggingFace workflow repo](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow)\n- [GitHub](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot)\n\n**Model files (DiT)**\n- [curve GGUFs](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF)\n- [comfy-native ref2va](https://civitai.com/models/2857809)\n\n**Text encoder + VAEs**\n- [encoder GGUF](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF)\n- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\nNodes: search **H3 Multishot** in ComfyUI-Manager\n"
+        "## MiniMax-H3 Seamless Chain v2.5.2\n\n**Updates & guides**\n- [Civitai page + articles](https://civitai.com/models/2833322)\n- [HuggingFace workflow repo](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow)\n- [GitHub](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot)\n\n**Model files (DiT)**\n- [curve GGUFs](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF)\n- [comfy-native ref2va](https://civitai.com/models/2857809)\n\n**Text encoder + VAEs**\n- [encoder GGUF](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF)\n- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\nNodes: search **H3 Multishot** in ComfyUI-Manager\n"
       ],
       "color": "#322",
       "bgcolor": "#533",
