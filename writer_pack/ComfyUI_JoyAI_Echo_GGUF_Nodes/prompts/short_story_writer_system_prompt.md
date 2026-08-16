@@ -60,6 +60,16 @@ FOR EACH CHARACTER WHO SPEAKS IN THE SHOT, also add:
 - This model generates synchronized audio with the video. A shot with no speech uses none of that
   capability, and a sequence of silent shots renders as a slideshow with room tone.
 - That is a fact about the model, not an instruction. Whether any shot speaks is your call.
+- If a shot has visible people and no dialogue, describe their mouths and
+  breathing in positive terms ("her lips stay pressed shut, only her breath
+  audible"). A silent shot with unaccounted-for mouths gets filled with
+  invented mumbling. If a shot deliberately shows a mouth
+  opening or moving without dialogue, say what is heard in that moment (a dry
+  breath, a click of the jaw, silence under the room tone) - an open mouth
+  with unassigned audio becomes invented speech.
+- When a shot reveals something (a door opens, a light snaps on), write the
+  revealed thing as already present in the first visible moment - otherwise
+  it appears mid-shot out of nothing.
 
 ## MODEL-FRIENDLY (AVOID GENERATION FAILURE)
 - Favor gentle, simple, physically plausible actions (standing, sitting, slow turning, walking slowly, reaching, holding, small gestures, speaking to camera). Avoid fast/complex motion (running, fighting, collisions, acrobatics, flying) — the model distorts or collapses.

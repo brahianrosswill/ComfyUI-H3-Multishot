@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.2.5 - MiniMax-H3 Seamless Chain**.
+Current release: **v2.5.0 - MiniMax-H3 Seamless Chain: the memory release**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -118,6 +118,73 @@ Every one of them can be removed instead — `INSTALL.md` in the zip gives the
 one-widget change or node deletion for each. Highlights: no RES4LYF → set
 `scheduler` to `beta` (measured cost: lip-sync 8/10 vs 10/10, all else equal);
 no Motion-Context → `continuity=first_frame`.
+
+---
+
+## 2.5.0 - the memory release: renders that no longer gamble, RAM that no longer runs out
+
+Four new memory systems, all measured, two of them automatic.
+
+### Automatic: the driver-headroom rule (the random-slowdown fix)
+
+The single biggest fix this pack has shipped. High-resolution renders would
+randomly take anywhere from 27 minutes to 3 hours for identical work - same
+seed, same settings, a lottery. The cause: when model weights plus working
+memory fill the card past roughly 95%, the Windows driver starts demoting
+GPU memory unpredictably, and whether your render crawled was luck.
+
+The pack now detects that zone before sampling and deliberately streams a few
+GB of weights instead of riding the ceiling - streamed weights are nearly
+free on modern ComfyUI, the last few percent of VRAM are not. The lottery
+render became 15 minutes, every time. Nothing to configure; you will see
+"driver headroom" lines in the console when it saves you.
+
+### low_ram_master: long chains without the system-RAM cliff
+
+Chained renders used to hold every finished shot in system RAM until the
+final join - tens of GB at the very last step, historically the point where
+long renders killed whole machines. Switch `low_ram_master` ON and shots
+stream to lossless disk staging as they finish; the final video is assembled
+from disk through the exact same levelling math (verified: 42.8 dB against
+the RAM path - the difference is codec noise). Peak RAM becomes about two
+shots. The finished file's path comes out of the new `master_path` output.
+
+### Remote text encoder: the 15 GB the render card never needed
+
+The text encoder runs for seconds per shot and occupies 15+ GB the rest of
+the time. The new **H3 Remote Text Encoder** node runs it on any second PC
+with ComfyUI and this pack: encodes travel over the LAN, identical results
+(verified across machines to float precision), and repeated scene text is
+answered from a local cache without any network at all. Ships wired behind a
+switch, default local - single-PC users see zero change.
+
+### H3 TAE Decode: 2-second draft previews
+
+A 9 MB tiny decoder turns latents into full-resolution draft frames in about
+2 seconds, against roughly a minute per shot through the real VAE. Drafts
+smear texture but composition and motion read clearly - built for seed hunts
+and batch triage, never for finals.
+
+### Also in 2.5.0
+
+- **Speed Boosters panel** - Spectrum, TeaCache, block cache and ComfyUI's
+  own EasyCache behind switches, each measured (-11% to -29%) and eye-tested,
+  with honest per-switch notes about which ones can distort people. Block
+  cache (identical output, -11%) ships ON. Missing packs print an install
+  link instead of breaking the graph.
+- **New defaults for 16-24 GB cards** - 736x1280 (the model distorts faces
+  below ~1 MP), 192 frames, 14 steps, curve-Q5_1 model, the full anti-drift
+  dial set including chain_gain_control=flatten.
+- **Dialogue that fits** - the writer is told each shot's real speaking time;
+  overruns and silent scripts print warnings with numbers at generation time.
+  Measured: lines over budget garble, lines under budget drag - matched
+  budgets reviewed as "natural, fully intelligible."
+- **Writer craft rules** from failed renders: silent shots with visible
+  people state what mouths are doing (stops invented mumbling); revealed
+  things are written as already present (stops mid-shot pop-ins).
+- **Clickable title blocks** in every workflow with version and links, a
+  plain-language notes pass, and two companion articles (quick start + the
+  full settings manual).
 
 ---
 
@@ -696,7 +763,7 @@ of the release routine, not read.
 Four nodes ship bypassed because their packs are not in the zip, and a missing
 class fails the entire prompt. That is the right default — but a bypassed node
 sitting on the canvas invites you to un-bypass it, and doing that without the
-pack installed breaks the workflow with no explanation. Joe's point, and he is
+pack installed breaks the workflow with no explanation. The reporter's point, and they are
 right.
 
 Now it says so in four places, in order of how hard they are to miss:

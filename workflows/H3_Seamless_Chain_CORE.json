@@ -1,7 +1,7 @@
 {
   "id": "h3-seamless-chain-core",
   "revision": 0,
-  "last_node_id": 12,
+  "last_node_id": 13,
   "last_link_id": 13,
   "nodes": [
     {
@@ -25,7 +25,7 @@
       "bgcolor": "#653",
       "properties": {},
       "widgets_values": [
-        "CORE - H3 SEAMLESS CHAIN (no extra packs needed)\n\nThis variant uses ONLY this node pack and stock ComfyUI nodes. Type your\nshots into the sampler's script box, one prompt per shot with --- on its\nown line between them, and queue once. Each shot's last frame becomes the\nnext shot's first frame, the duplicate boundary frame is trimmed, and the\nseam audio is welded at the quietest gap so words are not clipped.\n\nEverything lands as one master video plus a matching audio file in\noutput/video/H3CHAIN/.\n\nRECIPE (shipped, render-verified): fl2va checkpoint, euler + beta57,\n14 steps, 243 frames per shot (~10.1s at 24fps). Keep the mux at 24fps -\nother rates audibly shift voice accents.\n\nWRITING RULES FOR CLEAN JOINS\n- Every shot after the first OPENS holding the previous shot's exact\n  closing arrangement, with about two quiet seconds (a breath, a small\n  weight shift) before anyone speaks.\n- Every shot ENDS settled, dialogue finished, ~2 seconds spare.\n- A spoken line never straddles two shots.\n- Repeat each character's appearance AND the room/lighting description\n  word-for-word in every shot - that verbatim repetition is what holds\n  identity, together with the frame relay.\n\nWant the LLM prompt writer, raw-latent context pinning, and the VRAM\npanel? Use H3_Seamless_Chain_v1.json and install the optional packs\nlisted in INSTALL.md."
+        "SEAMLESS CHAIN - CORE (v2.2.6)\n\nThe simple version: no extra packs, no options. Type shots, press Run,\nget one joined video with sound.\n\nDefaults fit 16-24 GB cards. More VRAM? Raise the size in the controls."
       ]
     },
     {
@@ -92,7 +92,7 @@
       "widgets_values": [
         1280,
         736,
-        362,
+        192,
         14,
         "euler",
         "beta"
@@ -125,7 +125,7 @@
         "Node name for S&R": "H3ModelLoaderAny"
       },
       "widgets_values": [
-        "MiniMax-H3-ref2va-curve-Q8_0.gguf",
+        "MiniMax-H3-ref2va-curve-Q5_1.gguf",
         0.0
       ]
     },
@@ -443,7 +443,7 @@
       "bgcolor": "#653",
       "properties": {},
       "widgets_values": [
-        "SAMPLER\n\nscript: one prompt per shot, --- on its own line between shots.\n  JSON {\"prompts\": [...]} is also accepted.\nshot_count: 0 = one shot per prompt; 1-8 forces the count.\nsize / frames / steps: driven by MASTER CONTROLS.\nsampler + scheduler: set here (euler + beta57 = the verified pair).\nseed_per_shot [ON]: leave it on - measured, per-shot seeds HOLD the\n  face; a single seed for every shot drifted both face and voice.\nchain_gain_control: set to 'flatten' for chains past about 5 shots -\n  texture ratchets roughly 1.3x per join otherwise.\nself_anchor_voice: pins shot 1's own voice into later shots. Needs a\n  ref2va checkpoint; leave off on fl2va.\npreview_first_shot [ON]: writes shot 1 as soon as it decodes so a bad\n  take can be cancelled before the whole chain renders."
+        "YOUR SCRIPT\n\nOne paragraph per shot. Put --- on its own line between shots.\n3 paragraphs = 3 shots = one continuous video.\n\nKeep spoken lines to about 8-12 words per shot, wrapped like this:\n<d>[English] Your line here.</d>\n\nDescribe the place the same way, word for word, in every shot."
       ]
     },
     {
@@ -554,6 +554,27 @@
       "widgets_values": [
         "audio/H3CHAIN/core"
       ]
+    },
+    {
+      "id": 13,
+      "type": "MarkdownNote",
+      "pos": [
+        -1740,
+        -820
+      ],
+      "size": [
+        430,
+        230
+      ],
+      "flags": {},
+      "order": 0,
+      "mode": 0,
+      "properties": {},
+      "widgets_values": [
+        "## MiniMax-H3 Seamless Chain v2.5.0\n\n**Updates & guides**\n- [Civitai page + articles](https://civitai.com/models/2833322)\n- [HuggingFace workflow repo](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow)\n- [GitHub](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot)\n\n**Model files (DiT)**\n- [curve GGUFs](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF)\n- [comfy-native ref2va](https://civitai.com/models/2857809)\n\n**Text encoder + VAEs**\n- [encoder GGUF](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF)\n- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\nNodes: search **H3 Multishot** in ComfyUI-Manager\n\n*This is CORE: the zero-options variant.*"
+      ],
+      "color": "#432",
+      "bgcolor": "#653"
     }
   ],
   "links": [

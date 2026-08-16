@@ -396,12 +396,12 @@ character:
 
 ```
 <refs_root>/
-    ZARA/     zara_wide_01.png  zara_wide_02.png  ...
+    DANA/     dana_wide_01.png  dana_wide_02.png  ...
     GLYPH/    glyph_wide_01.png ...
     MARCUS/   ...
 ```
 
-A script that says "Zara pushes her glasses up" matches `ZARA/` and loads that
+A script that says "Dana pushes her glasses up" matches `DANA/` and loads that
 folder's images. Matching is on the folder name only - the image filenames
 inside can be anything.
 
@@ -412,11 +412,11 @@ present never gets cast. This is deliberate and field-proven.
 **What it loads.** First three matched characters, in first-mention order,
 `max_per_character` images each (default 3) taken in sorted filename order,
 capped at the model's 9 reference slots. It then prepends identity bindings to
-the prompt - `<Picture 1>, <Picture 2> are the same person (Zara).` - and prints
+the prompt - `<Picture 1>, <Picture 2> are the same person (Dana).` - and prints
 what it picked:
 
 ```
-[H3AutoRefs] 3 ref(s): ZARA/zara_wide_01.png -> <Picture 1>; ...
+[H3AutoRefs] 3 ref(s): DANA/dana_wide_01.png -> <Picture 1>; ...
 ```
 
 Glance at that line to confirm the right cast loaded.
@@ -435,7 +435,7 @@ take `ref_4` and beyond.
 | `refs_root` | *(empty)* | Folder holding one subfolder per character. Empty resolves to `input/h3_refs/`. Relative paths resolve under `input/`; absolute paths work too. |
 | `max_per_character` | `3` | Images per matched character. Front / three-quarter / profile sets hold identity best. |
 | `characters` | *(empty)* | Comma-separated folder list that **overrides the scan entirely**. Use it when the prose does not name someone. |
-| `overrides` | *(empty)* | Folder remaps, e.g. `zara=zara_preflash` to swap a character's set for particular scenes. Clear it afterwards. |
+| `overrides` | *(empty)* | Folder remaps, e.g. `dana=dana_outdoor` to swap a character's set for particular scenes. Clear it afterwards. |
 | `on_no_match` | `error` | `error` stops the run when nothing matches - an identity render without references is a wasted render. `no_reference` continues without them, which is what you want for scenes that have no recurring cast. |
 
 **The gotcha worth knowing.** The scan reads the *prose*, so the character must
@@ -465,3 +465,68 @@ comparison or explicit prose.
 - `flf_chain` (hard first/last-frame boundary plates) is implemented but
   needs a colour-matched plate set; without plates wired it now raises a
   clear error rather than silently rendering unanchored.
+
+
+## Speed boosters (measured 2026-08-16, same seed, 640x1152x192x14)
+
+Optional third-party accelerators, switchable on the H3 Speed Boosters node.
+All change the output slightly (trajectory divergence, like a seed change),
+none require specific hardware, VRAM cost is negligible.
+
+- baseline 621s
+- Spectrum 441s (-29%) - github.com/xmarre/ComfyUI-Spectrum-MiniMax-H3
+- TeaCache 0.15 531s (-14%), 0.30 491s (-21%) - github.com/Icyoung/ComfyUI-MiniMaxH3-TeaCache
+- block cache 551s (-11%) - github.com/T8mars/comfyui-minimax-h3-blockcache-T8
+- Spectrum + TeaCache stacked: 450s - no faster than Spectrum alone. Pick one.
+
+Eye-test verdicts (operator, same-seed masters, 2026-08-16): blockcache
+indistinguishable from baseline -> ships ON. Spectrum and TeaCache both showed
+visible distortion on people (environments unaffected). The stack was severely
+damaged. Ambient audio acceptable on every arm.
+
+A booster whose pack is missing prints an install link and passes the model
+through unchanged.
+
+
+## Memory systems (new in 2.5.0)
+
+### Driver headroom (automatic)
+
+When weights plus working memory would fill the card past roughly 95%, the
+Windows driver starts demoting GPU memory and render times become a lottery
+(the same job measured anywhere from 27 minutes to 3 hours). The pack now
+detects that zone during its auto-reserve pass and deliberately streams a few
+GB of weights instead - streamed weights are nearly free, the last few
+percent of VRAM are not. The lottery case measured 15 minutes flat after the
+fix. Fully automatic; the console prints a "driver headroom" line whenever it
+engages.
+
+### `low_ram_master` (Video Combine, default off)
+
+Off, every finished shot is held in system RAM until the final join - fine
+for a few shots, but a five-shot high-resolution chain can want tens of GB at
+the very end. On, each shot streams to lossless temporary files as it
+finishes and the master is assembled from disk through the same levelling
+math (verified at 42.8 dB against the in-RAM path - codec noise, nothing
+more). Peak RAM stays near two shots regardless of chain length. Turn it on
+if long chains have ever crashed your machine at the join step, or if you run
+under 32 GB of system RAM. The finished file's path is available on the new
+`master_path` output either way.
+
+### Remote text encoder (`H3 Remote Text Encoder`, optional)
+
+The text encoder works for a few seconds per shot and holds 15+ GB the whole
+render. If you have any second PC with ComfyUI, install this pack on it, point
+the node at `http://THAT-PC:8188`, and flip the switch node ON - prompts are
+encoded over there and your render card keeps the memory. Results are
+identical (verified across machines), and repeated text is answered from a
+local cache with no network call at all. The switch ships OFF; with it off
+the node is inert and single-PC setups are unaffected.
+
+### `H3 TAE Decode` (draft previews)
+
+A 9 MB tiny decoder that turns latents into full-resolution draft frames in
+about 2 seconds, versus roughly a minute per shot through the real VAE.
+Drafts smear fine texture but composition, framing and motion read clearly.
+Use it to audition seeds or triage a batch, then decode keepers through the
+real VAE. Never use it for finals.

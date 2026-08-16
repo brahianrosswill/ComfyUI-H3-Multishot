@@ -83,7 +83,7 @@ class SequentialOffloader:
         # transfer-speed optimization (enables async H2D copies), NOT a
         # correctness requirement — so it must never be fatal. cudaHostAlloc
         # exhaustion surfaces as "CUDA error: out of memory" even though it
-        # is HOST page-locked memory that ran out (hit on BEAST 2026-07-19:
+        # is HOST page-locked memory that ran out (hit on a 24 GB box 2026-07-19:
         # the refine's resident_blocks=0 tried to pin all 48 blocks after
         # the shot passes had pinned only 36 — the last ~11GB of pinning
         # pushed past what the host could lock). On the first failure we
@@ -2518,7 +2518,7 @@ class JoyEcho_Generate:
         independently, and blended in pixel space, so fine detail rotates at
         the window cadence. Measured on the 2026-08-03 master: cuff weave
         changes once per second; aligned-crop texture correlation 0.38-0.60
-        within a window vs 0.22-0.35 across windows. Joe sees it as "each
+        within a window vs 0.22-0.35 across windows. It reads as "each
         second is a new set of fine detail".
 
         This pass never leaves latent space: the shot's OWN generation latents
@@ -2792,7 +2792,7 @@ class JoyEcho_Generate:
                        # upstream checkpoint (the sequence-end corruption that
                        # forced the padded wrapper was fixed in 1.1 for x2;
                        # x1.5 never got a 1.1). Built for low-VRAM natives:
-                       # BEAST's 576x1024 -> 1152x2048 clears vertical 1080p.
+                       # a 3090's 576x1024 -> 1152x2048 clears vertical 1080p.
                        "anneal-x2": [0.400, 0.340, 0.280, 0.220, 0.165, 0.110,
                                      0.055, 0.0]}
         sigmas = SIGMA_TAILS.get(str(mode).split()[0].lower(), SIGMA_TAILS["subtle"])

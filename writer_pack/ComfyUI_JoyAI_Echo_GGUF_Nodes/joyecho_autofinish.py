@@ -20,7 +20,7 @@ Progress/errors: <output>/joyecho/_autofinish_<stamp>.log - the node
 cannot report them (it has already returned by then).
 
 Requires the ComfyUI-RTX-Video-Suite pack (RTXBatchVideoUpscale) and the
-NVIDIA MAXINE VSR SDK on this box. On a box without them (e.g. BEAST
+NVIDIA MAXINE VSR SDK on this box. On a box without them (e.g. a secondary render box
 unless MAXINE is installed) the worker logs the error and exits; the
 render itself is unaffected.
 """

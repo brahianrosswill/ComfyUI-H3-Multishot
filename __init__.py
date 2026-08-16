@@ -39,7 +39,10 @@ for _m in ("h3_keyframes",       # keyframe anchors
            "rift_engine_script",  # RiftEngineScript (H3 + LTX-2.5)
            "rift_prompt_source",  # RiftPromptSource (txt briefs + json)
            "rift_script_picker",  # RiftScriptPicker + speaker stash
-           "rift_writer_unload"):  # adds a free-VRAM switch to the writer
+           "rift_writer_unload",  # adds a free-VRAM switch to the writer
+           "h3_remote_encode",   # CLIP-over-LAN + the /encode server route
+           "h3_tae_decode",     # 9 MB draft decode for seed hunts
+           "h3_speed_boosters"): # switch panel for optional accelerators
     _merge(_m)
 
 # Teaches ComfyUI-GGUF the minimax_h3 architecture, in memory, at startup.

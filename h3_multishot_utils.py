@@ -932,6 +932,39 @@ def _install_auto_reserve(patcher, model_name):
                 if measured and reserve < measured:
                     how += (" [tight: below the measured pool %.1f GB]"
                             % (measured / 2**30))
+            # DRIVER HEADROOM (measured 2026-08-16). Five identical runs
+            # at ~96% VRAM took 27-175 minutes - same shape, same seed, a
+            # lottery. The same run with the reserve raised so ~3.6 GB of
+            # weights streamed instead peaked at 29.5/32.6 and took 15
+            # minutes, faster than every resident run. WDDM demotes
+            # unpredictably in the last few percent of VRAM, and streamed
+            # weights are cheap (core prefetch overlaps them) - so when
+            # weights + pool would land in that zone, RAISE the reserve:
+            # it is the one lever that pushes weights off and peak down.
+            if _cap > 0:
+                try:
+                    _total = _cm.get_total_memory(_dev)
+                except Exception:
+                    _total = _free
+                _wddm = int(_total * 0.09)
+                _pool_real = int(_known_need) if _known_need else reserve
+                _target = _pool_real + max(0, _wddm - _AUTO_KEEPOUT)
+                if (_w + _pool_real + _AUTO_KEEPOUT + _wddm > _free
+                        and reserve < _target):
+                    _target = min(_target,
+                                  max(int(_free - _AUTO_KEEPOUT),
+                                      _AUTO_MIN_POOL))
+                    how += (" | +driver headroom %.1f -> %.1f GB"
+                            % (reserve / 2**30, _target / 2**30))
+                    print("[H3AutoReserve] driver headroom: raising the "
+                          "reserve %.1f -> %.1f GB so ~%.1f GB of weights "
+                          "stream instead of riding the last few percent "
+                          "of VRAM (that zone measured 2-12x slower)."
+                          % (reserve / 2**30, _target / 2**30,
+                             max(0.0, (_w + _pool_real + _AUTO_KEEPOUT
+                                       + _wddm - _free)) / 2**30),
+                          flush=True)
+                    reserve = _target
         except Exception:
             pass
         _auto_session[key] = reserve
@@ -3139,11 +3172,27 @@ class H3MultishotMemorySampler:
                            "leave this empty silence is generated to match. "
                            "Supply the clip's real audio when you want its "
                            "voice timbre referenced too."}),
+            # APPENDED LAST (saved-graph widget order).
+            "low_ram_master": ("BOOLEAN", {
+                "default": False,
+                "tooltip": "Stream the master to disk instead of holding every "
+                           "decoded shot in host RAM until the join - peak RAM "
+                           "becomes ONE shot. Each shot is staged lossless the "
+                           "moment it decodes, levelled with the same "
+                           "master_normalize math (from stored statistics), "
+                           "and the finished file's path comes out of the new "
+                           "master_path output; master_frames carries a single "
+                           "placeholder frame. v1 streams the default config "
+                           "only: join_blend, join_fx and color_level=scene "
+                           "fall back to the RAM path with a printed reason. "
+                           "Needs ffmpeg on PATH."}),
         }}
 
-    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT")
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "LATENT", "LATENT", "INT",
+                    "STRING")
     RETURN_NAMES = ("master_frames", "master_audio", "shots_rendered",
-                    "video_latents", "audio_latents", "head_frames")
+                    "video_latents", "audio_latents", "head_frames",
+                    "master_path")
     OUTPUT_TOOLTIPS = (
         "The joined master, seams trimmed.",
         "Master audio.",
@@ -3158,7 +3207,9 @@ class H3MultishotMemorySampler:
         "The matching audio latent per shot, same batching, same caveat.",
         "Frames of replayed head carried by every shot AFTER the first "
         "(0 for shot 1, and 0 for continuity modes that do not pin). Trim "
-        "this many frames off the front of each later shot after you decode.")
+        "this many frames off the front of each later shot after you decode.",
+        "low_ram_master only: the finished master file on disk. Empty string "
+        "when low_ram_master is off (use master_frames as always).")
     FUNCTION = "run"
     CATEGORY = "sampling/minimax"
 
@@ -3202,7 +3253,8 @@ class H3MultishotMemorySampler:
             upscale_model_name="(none)",
             master_normalize="luma+contrast", pin_frames="22", pin_noise=0.0,
             pin_renorm=False, reference_subjects="",
-            reference_video=None, reference_video_audio=None):
+            reference_video=None, reference_video_audio=None,
+            low_ram_master=False):
         # two_pass_upscale is REMOVED as of 2.1.3. It spatially interpolated
         # the raw latent between passes, and H3's latent is not a spatially
         # smooth representation - interpolated values land off-manifold and
@@ -3377,6 +3429,47 @@ class H3MultishotMemorySampler:
 
         bank = _H3ChainBank(num_fix=bank_pinned, max_size=cap)
         frames_parts, audio_parts = [], []
+        # ---- low_ram_master eligibility (v1: shipped default config only) --
+        _stream_writer = None
+        if bool(locals().get("low_ram_master")):
+            _blockers = []
+            # join_blend is NOT a blocker: it only runs in seamless_tail/
+            # latent_handoff, and the writer defers each shot one step so
+            # the blend can still mutate the previous tail before staging.
+            if str(locals().get("join_fx", "off")) not in ("off", "none", ""):
+                _blockers.append("join_fx")
+            if str(locals().get("color_level", "")) == "scene":
+                _blockers.append("color_level=scene")
+            if _blockers:
+                print("[H3Memory] low_ram_master: falling back to the RAM "
+                      "path - %s read neighbouring shots and are not "
+                      "streamable in v1." % "+".join(_blockers), flush=True)
+            else:
+                try:
+                    import os
+                    try:
+                        from .h3_stream_master import ShotStreamWriter
+                    except ImportError:
+                        import importlib.util as _ilu
+                        _sp = os.path.join(os.path.dirname(
+                            os.path.abspath(__file__)), "h3_stream_master.py")
+                        _spec = _ilu.spec_from_file_location(
+                            "h3_stream_master", _sp)
+                        _mod = _ilu.module_from_spec(_spec)
+                        _spec.loader.exec_module(_mod)
+                        ShotStreamWriter = _mod.ShotStreamWriter
+                    import folder_paths as _fp
+                    _tdir = os.path.join(_fp.get_output_directory(), "video",
+                                         "H3CHAIN_STREAM",
+                                         "tmp_%d" % os.getpid())
+                    _stream_writer = ShotStreamWriter(_tdir, fps=24)
+                    print("[H3Memory] low_ram_master ON: shots stage to %s, "
+                          "peak host RAM = one shot." % _tdir, flush=True)
+                except Exception as _e:  # noqa: BLE001
+                    print("[H3Memory] low_ram_master unavailable (%s) - "
+                          "using the RAM path." % _e, flush=True)
+                    _stream_writer = None
+
         _lat_v_parts, _lat_a_parts = [], []   # issue #12: raw per-shot latents
         upscale_model = None
         if upscale_model_name not in ("(none)", "", None):
@@ -4551,8 +4644,11 @@ class H3MultishotMemorySampler:
             elif si > 0 and continuity in ("seamless_tail", "latent_handoff"):
                 ov = min(_OV_HO if continuity == "latent_handoff" else _OV,
                          imgs.shape[0] - 1)
-                if join_blend and frames_parts:
-                    prev = frames_parts[-1]
+                _blend_prev = (frames_parts[-1] if frames_parts else
+                               (_stream_writer.pending
+                                if _stream_writer is not None else None))
+                if join_blend and _blend_prev is not None:
+                    prev = _blend_prev
                     band = min(ov, prev.shape[0])
                     w = torch.linspace(1.0, 0.0, band).view(-1, 1, 1, 1)
                     new_band = imgs[:band].cpu()
@@ -4629,7 +4725,12 @@ class H3MultishotMemorySampler:
 
             # fp16: the encoder quantises to uint8 downstream, and this
             # timeline is what exhausted host RAM at 6 shots x 243f.
-            frames_parts.append(imgs.cpu().half())
+            if _stream_writer is not None:
+                # streaming: the shot goes to lossless disk NOW and its RAM is
+                # returned; only 1-D statistics stay behind.
+                _stream_writer.add(imgs.cpu().float())
+            else:
+                frames_parts.append(imgs.cpu().half())
             audio_parts.append((wav if wav.ndim == 3 else wav.unsqueeze(0)).cpu())
 
         if color_level == "scene" and len(frames_parts) > 1:
@@ -4689,6 +4790,34 @@ class H3MultishotMemorySampler:
                  tuple(_lat_a["samples"].shape) if _lat_a_parts else "none",
                  _cp_trim), flush=True)
 
+        # always the short 40ms weld: a long crossfade CONSUMES its overlap,
+        # which shortened audio 375ms per join and walked lip sync off from
+        # shot 2 onward. The seamless_tail trim above pre-compensates 40ms.
+        waveform = _xfade_audio(audio_parts, sr, ms=40)
+
+        if _stream_writer is not None:
+            # Streaming finish: gains from stored statistics (same math as
+            # _mn_normalize), temps re-streamed one at a time into the master
+            # encoder. Peak RAM this whole branch: one decode chunk.
+            import os
+            import folder_paths as _fp
+            _mdir = os.path.join(_fp.get_output_directory(),
+                                 "video", "H3CHAIN_STREAM")
+            os.makedirs(_mdir, exist_ok=True)
+            _i = 1
+            while os.path.exists(os.path.join(_mdir, "master_%05d.mp4" % _i)):
+                _i += 1
+            _mpath = os.path.join(_mdir, "master_%05d.mp4" % _i)
+            _stream_writer.finalize(_mpath, master_normalize, waveform, sr)
+            _ph = torch.zeros((1, _stream_writer.shots[0]["h"],
+                               _stream_writer.shots[0]["w"], 3),
+                              dtype=torch.half)
+            print(f"[H3Memory] done (streamed): {n} shots -> {_mpath}. "
+                  "master_frames is a 1-frame placeholder; wire master_path.",
+                  flush=True)
+            return (_ph, {"waveform": waveform, "sample_rate": sr}, n,
+                    _lat_v, _lat_a, int(_cp_trim), _mpath)
+
         if master_normalize != "off":
             frames_parts, _mn_msg = _mn_normalize(frames_parts, master_normalize)
             if _mn_msg:
@@ -4708,14 +4837,10 @@ class H3MultishotMemorySampler:
             _o += int(_p.shape[0])
             frames_parts[_i] = None
             del _p
-        # always the short 40ms weld: a long crossfade CONSUMES its overlap,
-        # which shortened audio 375ms per join and walked lip sync off from
-        # shot 2 onward. The seamless_tail trim above pre-compensates 40ms.
-        waveform = _xfade_audio(audio_parts, sr, ms=40)
         print(f"[H3Memory] done: {n} shots, {master.shape[0]} frames "
               f"(~{master.shape[0] / 24.0:.1f}s).", flush=True)
         return (master, {"waveform": waveform, "sample_rate": sr}, n,
-                _lat_v, _lat_a, int(_cp_trim))
+                _lat_v, _lat_a, int(_cp_trim), "")
 
 class H3OptionalImage:
     """An on/off gate for an OPTIONAL image input.
