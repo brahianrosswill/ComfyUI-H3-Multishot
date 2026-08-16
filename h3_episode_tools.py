@@ -723,6 +723,9 @@ class H3StudioSwitches:
         ("block_cache", True),
         ("dual_clock_sampler", False),
         ("hybrid_cond", False),
+        # Appended last on purpose: widgets_values are positional, so older
+        # saved panels load unchanged and pick up the default.
+        ("remote_encoder", False),
     ]
 
     @classmethod

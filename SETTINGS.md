@@ -488,7 +488,7 @@ A booster whose pack is missing prints an install link and passes the model
 through unchanged.
 
 
-## Memory systems (new in 2.5.0)
+## Memory systems (new in 2.5.1)
 
 ### Driver headroom (automatic)
 
@@ -517,11 +517,12 @@ under 32 GB of system RAM. The finished file's path is available on the new
 
 The text encoder works for a few seconds per shot and holds 15+ GB the whole
 render. If you have any second PC with ComfyUI, install this pack on it, point
-the node at `http://THAT-PC:8188`, and flip the switch node ON - prompts are
-encoded over there and your render card keeps the memory. Results are
+the node at `http://THAT-PC:8188`, and turn `remote_encoder` ON in the
+VRAM / SPEED SWITCHES panel - prompts are encoded over there and your render
+card keeps the memory. Results are
 identical (verified across machines), and repeated text is answered from a
-local cache with no network call at all. The switch ships OFF; with it off
-the node is inert and single-PC setups are unaffected.
+local cache with no network call at all. The flag ships OFF; off, the
+node is inert and single-PC setups are unaffected.
 
 ### `H3 TAE Decode` (draft previews)
 

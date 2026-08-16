@@ -2,7 +2,7 @@
   "id": "h3-seamless-chain-v1",
   "revision": 0,
   "last_node_id": 69,
-  "last_link_id": 94,
+  "last_link_id": 95,
   "nodes": [
     {
       "id": 28,
@@ -2013,6 +2013,14 @@
           "type": "BOOLEAN",
           "slot_index": 6,
           "links": []
+        },
+        {
+          "name": "remote_encoder",
+          "type": "BOOLEAN",
+          "links": [
+            95
+          ],
+          "slot_index": 7
         }
       ],
       "title": "VRAM / SPEED SWITCHES (all OFF = verified)",
@@ -2020,6 +2028,7 @@
         "Node name for S&R": "H3StudioSwitches"
       },
       "widgets_values": [
+        false,
         false,
         false,
         false,
@@ -2229,7 +2238,7 @@
       "title": "joeygambino Workflow Pack v.2.2.6",
       "properties": {},
       "widgets_values": [
-        "## MiniMax-H3 Seamless Chain v2.5.0\n\n**Updates & guides**\n- [Civitai page + articles](https://civitai.com/models/2833322)\n- [HuggingFace workflow repo](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow)\n- [GitHub](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot)\n\n**Model files (DiT)**\n- [curve GGUFs](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF)\n- [comfy-native ref2va](https://civitai.com/models/2857809)\n\n**Text encoder + VAEs**\n- [encoder GGUF](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF)\n- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\nNodes: search **H3 Multishot** in ComfyUI-Manager\n"
+        "## MiniMax-H3 Seamless Chain v2.5.1\n\n**Updates & guides**\n- [Civitai page + articles](https://civitai.com/models/2833322)\n- [HuggingFace workflow repo](https://huggingface.co/joeygambino/MiniMax-H3-Multishot-Workflow)\n- [GitHub](https://github.com/jlucasmcrell/ComfyUI-H3-Multishot)\n\n**Model files (DiT)**\n- [curve GGUFs](https://huggingface.co/joeygambino/MiniMax-H3-curve-GGUF)\n- [comfy-native ref2va](https://civitai.com/models/2857809)\n\n**Text encoder + VAEs**\n- [encoder GGUF](https://huggingface.co/joeygambino/MiniMax-H3-encoder-GGUF)\n- [Comfy-Org/MiniMax-H3](https://huggingface.co/Comfy-Org/MiniMax-H3)\n\nNodes: search **H3 Multishot** in ComfyUI-Manager\n"
       ],
       "color": "#322",
       "bgcolor": "#533",
@@ -2821,7 +2830,7 @@
         {
           "name": "use_on",
           "type": "BOOLEAN",
-          "link": null
+          "link": 95
         },
         {
           "name": "off_path",
@@ -2870,7 +2879,7 @@
       "title": "REMOTE ENCODER - how to",
       "properties": {},
       "widgets_values": [
-        "REMOTE ENCODER  (optional)\n\nRuns the text encoder on a second PC, so this card never loads it. Repeated scene text is answered from a local cache without touching the network at all.\n\nTo use it:\n1. On the other PC: install this node pack (+ ComfyUI-GGUF for .gguf    encoders), put the encoder file in models/text_encoders, and launch    ComfyUI with  --listen 0.0.0.0  added to its start line.\n2. Set endpoint to that PC, e.g. http://ITS-NAME:8188\n3. Set clip_name to the encoder file's name ON THAT PC.\n4. Flip the ENCODER switch ON. OFF = normal local encoding, exactly as\n   before.\n\nThe first request is slow - the other PC loads the encoder once, then keeps it ready. If that PC is off, the render stops with a clear message: flip the switch back OFF and render locally."
+        "REMOTE ENCODER  (optional)\n\nRuns the text encoder on a second PC, so this card never loads it. Repeated scene text is answered from a local cache without touching the network at all.\n\nTo use it:\n1. On the other PC: install this node pack (+ ComfyUI-GGUF for .gguf    encoders), put the encoder file in models/text_encoders, and launch    ComfyUI with  --listen 0.0.0.0  added to its start line.\n2. Set endpoint to that PC, e.g. http://ITS-NAME:8188\n3. Set clip_name to the encoder file's name ON THAT PC.\n4. Turn remote_encoder ON in the VRAM / SPEED SWITCHES panel - it\n   drives the ENCODER switch. OFF = normal local encoding, exactly as\n   before.\n\nThe first request is slow - the other PC loads the encoder once, then keeps it ready. If that PC is off, the render stops with a clear message: flip the switch back OFF and render locally."
       ],
       "color": "#233",
       "bgcolor": "#355"
@@ -2904,7 +2913,7 @@
         "Node name for S&R": "H3RemoteTextEncoderClip"
       },
       "widgets_values": [
-        "http://OTHER PC:8188",
+        "http://OTHER-PC:8188",
         "MiniMax-H3-encoder-Q4_K_M.gguf",
         600,
         "minimax"
@@ -3583,6 +3592,14 @@
       30,
       1,
       "CLIP"
+    ],
+    [
+      95,
+      3,
+      7,
+      68,
+      0,
+      "BOOLEAN"
     ]
   ],
   "groups": [

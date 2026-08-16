@@ -4,7 +4,7 @@
 
 MiniMax-H3 natively generates blocks of roughly 10-15 seconds. This pack chains those blocks into a scene of arbitrary length and joins them so the result reads as a single unedited camera take rather than a cut sequence. It ships two independent chaining mechanisms, a complete single-purpose workflow (plus a variant with zero third-party dependencies), a dual-format model loader (safetensors + GGUF), and the GGUF architecture patch H3 needs.
 
-Current release: **v2.5.0 - MiniMax-H3 Seamless Chain: the memory release**.
+Current release: **v2.5.1 - MiniMax-H3 Seamless Chain: the memory release**.
 
 - GitHub: <https://github.com/jlucasmcrell/ComfyUI-H3-Multishot>
 - Civitai: <https://civitai.com/models/2833322>
@@ -121,7 +121,7 @@ no Motion-Context → `continuity=first_frame`.
 
 ---
 
-## 2.5.0 - the memory release: renders that no longer gamble, RAM that no longer runs out
+## 2.5.1 - the memory release: renders that no longer gamble, RAM that no longer runs out
 
 Four new memory systems, all measured, two of them automatic.
 
@@ -155,8 +155,8 @@ The text encoder runs for seconds per shot and occupies 15+ GB the rest of
 the time. The new **H3 Remote Text Encoder** node runs it on any second PC
 with ComfyUI and this pack: encodes travel over the LAN, identical results
 (verified across machines to float precision), and repeated scene text is
-answered from a local cache without any network at all. Ships wired behind a
-switch, default local - single-PC users see zero change.
+answered from a local cache without any network at all. Turn `remote_encoder` ON in the VRAM / SPEED
+SWITCHES panel to use it; it ships OFF, so single-PC users see zero change.
 
 ### H3 TAE Decode: 2-second draft previews
 
@@ -165,7 +165,7 @@ A 9 MB tiny decoder turns latents into full-resolution draft frames in about
 smear texture but composition and motion read clearly - built for seed hunts
 and batch triage, never for finals.
 
-### Also in 2.5.0
+### Also in 2.5.1
 
 - **Speed Boosters panel** - Spectrum, TeaCache, block cache and ComfyUI's
   own EasyCache behind switches, each measured (-11% to -29%) and eye-tested,
